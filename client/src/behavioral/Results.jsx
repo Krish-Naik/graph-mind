@@ -5,6 +5,7 @@ import { DEFAULT_TIERS, OUTLIER, num, tierColors } from '../util.js';
 import GraphView from './GraphView.jsx';
 import SimilarityChart from './SimilarityChart.jsx';
 import { CommunityBubble, CommunityDetail, EntityMap, PipelineFlow, ProfileHeatmap, TierBox, TierDonut } from './charts.jsx';
+import { AlgorithmComparisonCharts, NMIAnalysisChart, DensityAnalysisCharts } from './AdvancedCharts.jsx';
 import { isDimmed } from './viz.js';
 import './behavioral.css';
 
@@ -34,12 +35,14 @@ function CommunityTable({ communities, colors, selComm, selTier, onPickComm }) {
   );
   return (
     <div className="tablewrap"><table className="ctable">
-      <thead><tr>{head('community_id', 'community')}{head('size', 'members')}{head('avg_total_activity', 'avg total activity')}{head('median_total_activity', 'median')}{head('cohesion', 'cohesion')}<th>what they do most</th>{head('tier', 'tier')}</tr></thead>
+      <thead><tr>{head('community_id', 'community')}{head('size', 'members')}{head('avg_total_activity', 'avg total activity')}{head('median_total_activity', 'median')}{head('cohesion', 'cohesion')}{head('intra_density', 'intra-density')}{head('conductance', 'conductance')}<th>what they do most</th>{head('tier', 'tier')}</tr></thead>
       <tbody>{rows.map((c) => (
         <tr key={c.community_id} className={`crow ${selComm === c.community_id ? 'sel' : ''}`} onClick={() => onPickComm(c.community_id)}>
           <td>{c.community_id}</td><td>{c.size}</td>
           <td>{num(c.avg_total_activity)}<span className="minibar" style={{ width: `${Math.max(2, (60 * c.avg_total_activity) / maxAvg)}px` }} /></td>
           <td>{num(c.median_total_activity)}</td><td>{num(c.cohesion)}</td>
+          <td>{c.intra_density != null ? c.intra_density.toFixed(4) : '\u2014'}</td>
+          <td>{c.conductance != null ? c.conductance.toFixed(4) : '\u2014'}</td>
           <td>{c.top_behaviors ? c.top_behaviors.map((t) => <span className="chip" key={t.name}>{t.name} {Math.round(t.share_pct)}%</span>) : c.top_behavior}</td>
           <td><span className="badge" style={{ background: colors[c.tier] || '#64748b' }}>{c.tier}</span></td>
         </tr>
@@ -130,9 +133,10 @@ function Dashboard({ job }) {
         <GraphView nodes={graphNodes} edges={graphEdges} colors={colors} mode={mode} colorBy={colorBy} selComm={selComm} selTier={selTier} onPickComm={pickComm} />
       </Section>
 
-      <Section title="All communities" sub="Click a header to sort, click a row to select.">
+      <Section title="All communities" sub="Click a header to sort, click a row to select."
+        how="Intra-density: how densely connected members of this community are internally. Conductance: ratio of edges that cross the community boundary (lower = better separation).">
         <CommunityTable communities={r.communities} colors={colors} selComm={selComm} selTier={selTier} onPickComm={pickComm} />
-        <p className="muted small">Cohesion = average similarity between members of the same community (1 = identical behavior).</p>
+        <p className="muted small">Cohesion = average similarity between members of the same community (1 = identical behavior). Intra-density = edge density within the community. Conductance: lower = better separated from the rest.</p>
       </Section>
 
       <div className="grid g2" style={{ marginTop: 22 }}>
@@ -155,6 +159,28 @@ function Dashboard({ job }) {
           <p className="muted small">Modularity: how well-separated the communities are (above 0.3 is meaningful, higher is better). NMI: agreement with the label column, if one was supplied; low values are normal because communities follow behavior, not the label. The darker bar is the algorithm used for the tiers.</p>
         </div>
       </div>
+
+      {/* ---- NEW ADVANCED SECTIONS ---- */}
+      <Section
+        title="Louvain vs Leiden vs Label Propagation"
+        sub="Deep comparison of all community detection algorithms run on this graph."
+        how="Overview: modularity and intra-density bars; Radar: normalised quality across four metrics; Size: how many communities of each size each algorithm found; Intra-density: per-community density profile.">
+        <AlgorithmComparisonCharts algorithmComparison={r.algorithm_comparison} benchmark={r.benchmark} />
+      </Section>
+
+      <Section
+        title="NMI Analysis"
+        sub="How well do the detected communities agree with the ground-truth label column?"
+        how="NMI (Normalised Mutual Information) = 1 means perfect agreement, ~0 is typical because communities group by behavior shape, not by final outcome. The sweep shows how NMI changes when we exclude tiny communities.">
+        <NMIAnalysisChart nmiAnalysis={r.nmi_analysis} benchmark={r.benchmark} />
+      </Section>
+
+      <Section
+        title="Graph Density Analysis"
+        sub="Topology of the similarity graph and density profile of each community."
+        how="Topology: global graph metrics. Degree distribution: how many edges each entity has. Edge weights: distribution of cosine similarities. Community density: intra-density vs size scatter and conductance bars.">
+        <DensityAnalysisCharts graphMetrics={r.graph_metrics} communities={r.communities} />
+      </Section>
     </>
   );
 }

@@ -12,6 +12,7 @@ from .graph import scale, similarity, similarity_histogram, build_graph, thresho
 from .communities import detect, NAMES
 from .profiling import profile_communities, assign_tiers, OUTLIER, behavior_profile, community_stats
 from .eligibility import check_matrix
+from .graph_metrics import graph_density_metrics, algorithm_comparison, nmi_analysis, community_density_profile
 
 
 MAX_BEHAVIORS_SHOWN = 25
@@ -118,6 +119,13 @@ def run(req: RunRequest) -> dict:
             cross[tuple(sorted((a, b)))] += 1
 
     tier_counts = Counter(node_tier.values())
+
+    # ---- NEW: graph density, algorithm comparison, NMI analysis ----
+    density = graph_density_metrics(G, sim, ids)
+    algo_cmp = algorithm_comparison(results, G)
+    nmi_ext = nmi_analysis(results, G, label_map)
+    primary_density_profile = {r["community_id"]: r for r in community_density_profile(G, comms)}
+
     return {
         "status": "ok",
         "eligibility": report,
@@ -136,7 +144,8 @@ def run(req: RunRequest) -> dict:
         },
         "similarity": hist,
         "benchmark": bench,
-        "communities": [community_row(r, bprof[int(r.community_id)], cstats[int(r.community_id)])
+        "communities": [community_row(r, bprof[int(r.community_id)], cstats[int(r.community_id)],
+                                      primary_density_profile.get(int(r.community_id), {}))
                         for r in prof.itertuples()],
         "behaviors": [{"name": b, "overall_mean": round(float(overall[b]), 3)} for b in shown],
         "sweep": sweep,
@@ -150,14 +159,18 @@ def run(req: RunRequest) -> dict:
             "edges": [{"source": a, "target": b, "weight": w} for (a, b), w in cross.items()]},
         "diagnostics": diagnostics(prof, report, bool(label_map), bench, primary, tier_counts, p),
         "outputs": {"classified_csv": csv_path},
+        # ---- new analytics sections ----
+        "graph_metrics": density,
+        "algorithm_comparison": algo_cmp,
+        "nmi_analysis": nmi_ext,
     }
 
 
-def community_row(r, profile: dict, stats: dict) -> dict:
+def community_row(r, profile: dict, stats: dict, density_row: dict = None) -> dict:
     """One community as sent to the UI: size, activity, spread, cohesion and its behavior fingerprint."""
     total_mean = sum(profile.values()) or 1.0
     top = sorted(profile.items(), key=lambda kv: -kv[1])[:3]
-    return {
+    out = {
         "community_id": int(r.community_id), "size": int(r.community_size),
         "avg_total_activity": round(float(r.avg_total_activity), 3),
         "median_total_activity": round(stats["median_total"], 3),
@@ -169,6 +182,11 @@ def community_row(r, profile: dict, stats: dict) -> dict:
         "top_behaviors": [{"name": str(k), "share_pct": round(100 * v / total_mean, 1)} for k, v in top],
         "profile": {str(k): round(float(v), 3) for k, v in profile.items()},
     }
+    if density_row:
+        out["intra_density"] = density_row.get("intra_density")
+        out["conductance"] = density_row.get("conductance")
+        out["intra_edges"] = density_row.get("intra_edges")
+    return out
 
 
 def pipeline_steps(n_total, n_sampled, G, comms, p, tier_counts, primary) -> list[dict]:
