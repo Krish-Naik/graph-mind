@@ -71,3 +71,37 @@ def test_nmi_with_label_covers_every_algorithm():
     assert out["available"] and set(out["nmi_by_algorithm"]) == {"louvain", "leiden", "lpa"}
     assert all(v is not None and v > 0.7 for v in out["nmi_by_algorithm"].values())
     assert out["contingency"]["algorithm"] == "leiden"
+
+def _fuzzy_graph(seed=3):
+    """Overlapping groups, so finer / coarser partitions both exist (like real behavior data)."""
+    return planted(n_groups=6, size=25, p_in=0.35, p_out=0.06, seed=seed)[0]
+
+
+def test_leiden_resolution_is_respected_and_changes_the_result(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "leidenalg", None)              # test the built-in path (Python 3.14 users)
+    monkeypatch.setitem(sys.modules, "igraph", None)
+    G = _fuzzy_graph()
+    res, rows = detect(G, ["louvain", "leiden"], 42, None, leiden_resolution=2.5)
+    leiden = next(r for r in rows if r["key"] == "leiden")
+    louvain = next(r for r in rows if r["key"] == "louvain")
+    assert leiden["resolution"] == 2.5 and louvain["resolution"] == 1.0
+    assert leiden["num_communities"] > louvain["num_communities"]        # finer communities
+    assert leiden["modularity"] != louvain["modularity"]                 # figures are not a copy
+    # modularity is always reported at gamma=1, so it must match networkx on the Leiden partition
+    assert abs(leiden["modularity"] - nx_comm.modularity(G, res["leiden"], weight="weight")) < 1e-5
+
+
+def test_default_leiden_resolution_differs_from_louvain_on_real_style_data():
+    G, _ = planted(n_groups=5, size=30, p_in=0.3, p_out=0.07, seed=11)
+    res, rows = detect(G, ["louvain", "leiden"], 42)                     # default gamma (1.5)
+    a = {frozenset(c) for c in res["louvain"]}
+    b = {frozenset(c) for c in res["leiden"]}
+    assert a != b
+
+
+def test_louvain_is_unchanged_by_the_leiden_setting():
+    G = _fuzzy_graph()
+    r1, _ = detect(G, ["louvain", "leiden"], 42, None, leiden_resolution=1.0)
+    r2, _ = detect(G, ["louvain", "leiden"], 42, None, leiden_resolution=3.0)
+    assert {frozenset(c) for c in r1["louvain"]} == {frozenset(c) for c in r2["louvain"]}

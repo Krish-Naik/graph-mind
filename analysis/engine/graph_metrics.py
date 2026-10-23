@@ -36,11 +36,30 @@ def graph_density_metrics(G: nx.Graph, sim: np.ndarray, ids: list) -> dict:
     lcc_size = max(len(c) for c in components) if components else 0
     lcc_frac = lcc_size / n if n else 0.0
 
-    # Diameter (on LCC only – full graph may be disconnected)
+    # Diameter / average path length (on LCC only - the full graph may be disconnected).
+    # Exact is O(n*m); above EXACT_LIMIT nodes we use BFS from a random sample of sources
+    # (avg path = unbiased estimate, diameter = lower bound), so big datasets stay fast.
+    EXACT_LIMIT, N_SOURCES = 400, 120
+    path_estimated = False
     try:
         lcc = G.subgraph(max(components, key=len)).copy()
-        diameter = nx.diameter(lcc) if len(lcc) > 1 else 1
-        avg_path = nx.average_shortest_path_length(lcc) if len(lcc) > 1 else 0.0
+        if len(lcc) <= 1:
+            diameter, avg_path = 1, 0.0
+        elif len(lcc) <= EXACT_LIMIT:
+            diameter = nx.diameter(lcc)
+            avg_path = nx.average_shortest_path_length(lcc)
+        else:
+            path_estimated = True
+            rnd = np.random.default_rng(42)
+            lnodes = list(lcc.nodes())
+            sources = [lnodes[i] for i in rnd.choice(len(lnodes), size=N_SOURCES, replace=False)]
+            tot, cnt, ecc = 0, 0, 0
+            for src in sources:
+                dist = nx.single_source_shortest_path_length(lcc, src)
+                tot += sum(dist.values())
+                cnt += len(dist) - 1
+                ecc = max(ecc, max(dist.values()))
+            diameter, avg_path = ecc, (tot / cnt if cnt else 0.0)
     except Exception:
         diameter = None
         avg_path = None
@@ -61,7 +80,8 @@ def graph_density_metrics(G: nx.Graph, sim: np.ndarray, ids: list) -> dict:
     # Centrality (computed only on LCC if large)
     target = lcc if lcc_size < 1000 else G
     try:
-        bc_vals = list(nx.betweenness_centrality(target, weight="weight", normalized=True).values())
+        k_bc = None if target.number_of_nodes() <= 300 else 150      # sampled betweenness on larger graphs
+        bc_vals = list(nx.betweenness_centrality(target, k=k_bc, seed=42, weight="weight", normalized=True).values())
         avg_betweenness = float(np.mean(bc_vals))
         max_betweenness = float(np.max(bc_vals))
     except Exception:
@@ -79,6 +99,7 @@ def graph_density_metrics(G: nx.Graph, sim: np.ndarray, ids: list) -> dict:
         "lcc_size": int(lcc_size),
         "lcc_fraction": round(float(lcc_frac), 4),
         "diameter": diameter,
+        "path_metrics_estimated": path_estimated,
         "avg_path_length": round(float(avg_path), 4) if avg_path is not None else None,
         "assortativity": round(float(assortativity), 6) if assortativity is not None else None,
         "avg_betweenness": round(float(avg_betweenness), 6) if avg_betweenness is not None else None,

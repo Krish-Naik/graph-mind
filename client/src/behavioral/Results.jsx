@@ -146,9 +146,9 @@ function Dashboard({ job }) {
           <SimilarityChart hist={r.similarity} threshold={s.threshold} sweep={r.sweep} />
         </div>
         <div className="card"><h2>Algorithm comparison</h2>
-          <table><thead><tr><th>algorithm</th><th>communities</th><th>modularity</th><th>NMI vs label</th></tr></thead>
+          <table><thead><tr><th>algorithm</th><th>communities</th><th>modularity (γ=1)</th><th>NMI vs label</th></tr></thead>
             <tbody>{r.benchmark.map((b) => (
-              <tr key={b.key}><td>{b.algorithm}{b.backend && <span className="muted small"> ({b.backend})</span>}</td><td>{b.num_communities ?? '-'}</td>
+              <tr key={b.key}><td>{b.algorithm}{(b.backend || b.key === 'leiden') && <span className="muted small"> ({[b.backend, b.key === 'leiden' && b.resolution != null ? `γ=${b.resolution}` : null].filter(Boolean).join(', ')})</span>}</td><td>{b.num_communities ?? '-'}</td>
                 <td>{b.modularity ?? <span className="muted" title={b.error}>unavailable</span>}</td>
                 <td>{b.nmi ?? <span className="muted" title={r.has_label ? 'Not computable for this algorithm' : 'No label column used'}>{b.error ? '-' : r.has_label ? 'n/a' : 'no label'}</span>}</td></tr>
             ))}</tbody></table>

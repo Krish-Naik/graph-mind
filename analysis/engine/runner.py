@@ -5,6 +5,7 @@ import time
 from collections import Counter
 import numpy as np
 import pandas as pd
+from sklearn.metrics import normalized_mutual_info_score
 
 from .schemas import RunRequest, Mapping
 from .matrix import build_matrix, load_labels
@@ -61,7 +62,7 @@ def run(req: RunRequest) -> dict:
     label_map = labels.to_dict() if labels is not None else None
 
     # 5. community detection + benchmark
-    results, bench = detect(G, p.algorithms, p.random_state, label_map)
+    results, bench = detect(G, p.algorithms, p.random_state, label_map, p.leiden_resolution)
     if not results:
         return {"status": "error", "message": "All community algorithms failed.", "benchmark": bench}
     ok_rows = [r for r in bench if "modularity" in r]
@@ -159,7 +160,7 @@ def run(req: RunRequest) -> dict:
         "macro_graph": {
             "nodes": [{"id": int(r.community_id), "size": int(r.community_size), "tier": r.tier} for r in prof.itertuples()],
             "edges": [{"source": a, "target": b, "weight": w} for (a, b), w in cross.items()]},
-        "diagnostics": diagnostics(prof, report, bool(label_map), bench, primary, tier_counts, p),
+        "diagnostics": diagnostics(prof, report, bool(label_map), bench, primary, tier_counts, p, results),
         "outputs": {"classified_csv": csv_path},
         # ---- new analytics sections ----
         "graph_metrics": density,
@@ -182,7 +183,7 @@ def partitions_payload(results: dict, G, bench: list) -> dict:
         node_to_c = {n: i for i, c in enumerate(comms) for n in c}
         b = info.get(key, {})
         out[key] = {"name": NAMES[key], "num_communities": len(comms), "modularity": b.get("modularity"),
-                    "nmi": b.get("nmi"), "backend": b.get("backend"),
+                    "nmi": b.get("nmi"), "backend": b.get("backend"), "resolution": b.get("resolution"),
                     "membership": [int(node_to_c[n]) for n in nodes]}
     return out
 
@@ -231,7 +232,7 @@ def pipeline_steps(n_total, n_sampled, G, comms, p, tier_counts, primary) -> lis
     ]
 
 
-def diagnostics(prof, report, has_labels, bench, primary, tier_counts=None, p=None) -> list[dict]:
+def diagnostics(prof, report, has_labels, bench, primary, tier_counts=None, p=None, results=None) -> list[dict]:
     """Plain-language caveats shown in the UI so results are interpreted honestly."""
     out = []
     small = int((prof["community_size"] <= 2).sum())
@@ -257,6 +258,22 @@ def diagnostics(prof, report, has_labels, bench, primary, tier_counts=None, p=No
             out.append({"level": "info", "text":
                         f"{100 * max(counts) / total:.0f}% of entities fall in '{big}'. Tiers split communities evenly, "
                         "not entities, so entity counts per tier can be very uneven."})
+    if results and "louvain" in results and "leiden" in results:
+        lou, lei = results["louvain"], results["leiden"]
+        n2c = lambda cs: {n: i for i, c in enumerate(cs) for n in c}
+        a, b = n2c(lou), n2c(lei)
+        keys = list(a)
+        agree = float(normalized_mutual_info_score([a[k] for k in keys], [b[k] for k in keys]))
+        gam = p.leiden_resolution if p is not None else 1.0
+        txt = (f"Louvain and Leiden agree on {agree:.0%} (NMI between their partitions): "
+               f"Louvain found {len(lou)} communities, Leiden (resolution {gam:g}) found {len(lei)}.")
+        if agree > 0.95:
+            txt += (" They are nearly identical because both maximise modularity and this graph has one very clear "
+                    "optimum; raise the Leiden resolution to make it look for finer groups.")
+        elif gam != 1.0:
+            txt += (" Leiden runs at its own resolution, so it splits the graph more finely than Louvain; "
+                    "set it to 1.0 for the textbook Leiden, which normally lands very close to Louvain.")
+        out.append({"level": "info", "text": txt})
     out.append({"level": "info", "text":
                 "Similarity uses cosine on min-max scaled values, so it compares the SHAPE of behavior (what people do), "
                 "while tiers use the MAGNITUDE (how much they do). A community can be 'similar' yet differ in volume."})

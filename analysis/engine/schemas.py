@@ -40,6 +40,8 @@ class Params(BaseModel):
     knn_k: int = Field(10, ge=1, le=100)
     algorithms: list[Literal["louvain", "leiden", "lpa"]] = ["louvain", "leiden", "lpa"]
     primary_algorithm: Literal["louvain", "leiden", "lpa", "best_modularity"] = "louvain"
+    # Leiden's own resolution (gamma). 1.0 = textbook modularity (usually ~ Louvain); >1 = finer communities.
+    leiden_resolution: float = Field(1.5, ge=0.1, le=5.0)
     tier_method: Literal["quantile", "thresholds"] = "quantile"
     tier_labels: list[str] = ["Low Engagement / At-Risk", "Moderate Engagement", "High Engagement"]
     low_cut: Optional[float] = None            # for tier_method="thresholds"

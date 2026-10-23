@@ -95,6 +95,7 @@ function StatChips({ p }) {
         Q = <b>{fmt(p.modularity)}</b> <i style={{ color: q.color }}>{q.label}</i>
       </span>
       <span className="cg-chip" title="Agreement with the label column (needs a label)">NMI = <b>{p.nmi == null ? '—' : fmt(p.nmi)}</b></span>
+      {p.resolution != null && <span className="cg-chip" title="Resolution gamma: 1 = standard modularity; higher = more, smaller communities">γ = <b>{p.resolution}</b></span>}
       {p.backend && <span className="cg-chip muted" title="Implementation used">{p.backend}</span>}
     </div>
   );

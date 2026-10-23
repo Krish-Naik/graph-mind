@@ -14,7 +14,7 @@ const initialMapping = (fileId) => ({
   useLabel: false, label: { fileId: '', entity_col: '', label_col: '' },
 });
 const initialParams = () => ({
-  sample_size: 300, graph_method: 'threshold', threshold: 0.85, knn_k: 10, algorithms: ['louvain', 'leiden', 'lpa'],
+  sample_size: 300, graph_method: 'threshold', threshold: 0.85, knn_k: 10, algorithms: ['louvain', 'leiden', 'lpa'], leiden_resolution: 1.5,
   primary_algorithm: 'louvain', tier_method: 'quantile', tier_labels: [...DEFAULT_TIERS], low_cut: '', high_cut: '', min_community_size: 1,
 });
 
@@ -35,7 +35,8 @@ export function toParams(p) {
   const out = {
     sample_size: p.sample_size === '' || p.sample_size == null ? null : Number(p.sample_size),
     graph_method: p.graph_method, threshold: Number(p.threshold), knn_k: Number(p.knn_k),
-    algorithms: p.algorithms, primary_algorithm: p.primary_algorithm, tier_method: p.tier_method,
+    algorithms: p.algorithms, leiden_resolution: Number(p.leiden_resolution) || 1.5,
+    primary_algorithm: p.primary_algorithm, tier_method: p.tier_method,
     tier_labels: p.tier_labels, min_community_size: Number(p.min_community_size),
   };
   if (p.tier_method === 'thresholds') { out.low_cut = Number(p.low_cut); out.high_cut = Number(p.high_cut); }
@@ -75,6 +76,36 @@ export function guessLabel(files, profiles, entityCol, mainFileId) {
   return best ? { fileId: best.fileId, entity_col: best.entity_col, label_col: best.label_col } : null;
 }
 
+/**
+ * Find the lookup join automatically (OULAD: studentVle.id_site -> vle.activity_type).
+ * A lookup file is another file that shares a column with the main file where that column is (almost) unique,
+ * and that holds a categorical column with a sensible number of values (the behavior category).
+ * Only used when the main file itself has no usable behavior column.
+ */
+const BEHAVIOR_NAME = /(type|categor|genre|kind|class|group|department|aisle|activity|segment)/i;
+export function guessLookup(files, profiles, mainFileId, entityCol) {
+  const main = profiles[mainFileId];
+  if (!main) return null;
+  const mainCols = new Set(main.columns.map((c) => c.name));
+  let best = null;
+  for (const f of files) {
+    if (f.id === mainFileId) continue;
+    const p = profiles[f.id];
+    if (!p) continue;
+    for (const key of p.columns) {
+      if (key.name === entityCol || !mainCols.has(key.name)) continue;
+      if (!(key.approx_distinct >= 0.5 * p.rows)) continue;            // must behave like a key of a lookup table
+      for (const c of p.columns) {
+        if (c.name === key.name || c.numeric) continue;
+        if (!(c.approx_distinct >= 3 && c.approx_distinct <= 200)) continue;
+        const score = (BEHAVIOR_NAME.test(c.name) ? 0 : 1000) + Math.abs(c.approx_distinct - 12);
+        if (!best || score < best.score) best = { score, fileId: f.id, key: key.name, behavior: c.name };
+      }
+    }
+  }
+  return best;
+}
+
 function Select({ value, onChange, options, blank = 'choose...' }) {
   return (
     <select value={value || ''} onChange={(e) => onChange(e.target.value)}>
@@ -95,6 +126,8 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
   const [jobId, setJobId] = useState(null);
   const [runErr, setRunErr] = useState(null);
   const [labelTouched, setLabelTouched] = useState(false);   // user decided about the label: stop auto-detecting
+  const [lookupTouched, setLookupTouched] = useState(false);  // same for the lookup join
+  const [lookupAuto, setLookupAuto] = useState(null);         // what was auto-detected (for the info banner)
 
   const setMap = (patch) => setM((x) => ({ ...x, ...patch }));
   const cols = (fid) => profiles[fid]?.columns || [];
@@ -117,12 +150,25 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
     if (g) setM((x) => (x.useLabel ? x : { ...x, useLabel: true, label: g }));
   }, [files, profiles, m.entity_col, m.mainFileId, m.useLabel, labelTouched]);
 
+  // auto-detect the lookup join (e.g. studentVle.csv + vle.csv) when the main file has no behavior column of its own,
+  // so the mapping is pre-filled without clicking a preset
+  useEffect(() => {
+    if (lookupTouched || m.format !== 'long' || m.useLookup || m.behavior_col || !m.entity_col) return;
+    const g = guessLookup(files, profiles, m.mainFileId, m.entity_col);
+    if (!g) return;
+    setLookupAuto({ file: files.find((f) => f.id === g.fileId)?.originalName, key: g.key, behavior: g.behavior });
+    setM((x) => (x.useLookup || x.behavior_col ? x : {
+      ...x, useLookup: true, behavior_col: g.behavior,
+      lookup: { fileId: g.fileId, source_key: g.key, lookup_key: g.key, split_delimiter: '' },
+    }));
+  }, [files, profiles, m.mainFileId, m.entity_col, m.format, m.useLookup, m.behavior_col, lookupTouched]);
+
   const behaviorCols = m.useLookup ? names(m.lookup.fileId) : names(m.mainFileId);
   const numericCols = cols(m.mainFileId).filter((c) => c.numeric).map((c) => c.name);
 
   function applyPreset(p) {
     const built = p.build(files);
-    setLabelTouched(true); setM(built.mapping); setParams((x) => ({ ...x, ...built.params })); setCheck(null);
+    setLabelTouched(true); setLookupTouched(true); setLookupAuto(null); setM(built.mapping); setParams((x) => ({ ...x, ...built.params })); setCheck(null);
   }
 
   async function goCheck() {
@@ -189,10 +235,11 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
               {m.format === 'long' && (
                 <>
                   <h3>Lookup file (optional)</h3>
-                  <div className="inline" style={{ marginBottom: 10 }}><input type="checkbox" id="ul" checked={m.useLookup} onChange={(e) => setMap({ useLookup: e.target.checked, behavior_col: '' })} />
+                  <div className="inline" style={{ marginBottom: 10 }}><input type="checkbox" id="ul" checked={m.useLookup} onChange={(e) => { setLookupTouched(true); setLookupAuto(null); setMap({ useLookup: e.target.checked, behavior_col: '' }); }} />
                     <label htmlFor="ul">The behavior category is in a different file (join needed)</label></div>
                   {m.useLookup && (
                     <>
+                      {lookupAuto && <div className="alert ok" style={{ padding: '6px 10px' }}>Join detected automatically: <b>{lookupAuto.file}</b> on <b>{lookupAuto.key}</b>, behavior = <b>{lookupAuto.behavior}</b>. Change it below if it is not right.</div>}
                       <Field label="Lookup file"><Select value={m.lookup.fileId} onChange={(v) => setMap({ lookup: { ...m.lookup, fileId: v }, behavior_col: '' })} options={fileOpts} /></Field>
                       <div className="grid g2">
                         <Field label="Key in main file"><Select value={m.lookup.source_key} onChange={(v) => setMap({ lookup: { ...m.lookup, source_key: v } })} options={names(m.mainFileId)} /></Field>
@@ -274,6 +321,11 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
                 {[['louvain', 'Louvain'], ['leiden', 'Leiden'], ['lpa', 'Label Propagation']].map(([k, l]) => (
                   <div className="inline" key={k}><input type="checkbox" id={`a-${k}`} checked={params.algorithms.includes(k)} onChange={() => toggleAlgo(k)} /><label htmlFor={`a-${k}`}>{l}</label></div>
                 ))}</Field>
+              {params.algorithms.includes('leiden') && (
+                <Field label={`Leiden resolution = ${params.leiden_resolution}`}
+                  hint="1.0 = textbook Leiden, which usually lands almost exactly on Louvain's communities. Higher = Leiden looks for finer, smaller communities, so its graph, modularity and NMI differ from Louvain's.">
+                  <input type="range" min="0.5" max="3" step="0.1" value={params.leiden_resolution} onChange={(e) => setP({ leiden_resolution: Number(e.target.value) })} style={{ width: '100%' }} /></Field>
+              )}
               <Field label="Algorithm used for the tiers">
                 <Select value={params.primary_algorithm} onChange={(v) => setP({ primary_algorithm: v })} blank="" options={[{ value: 'louvain', label: 'Louvain' }, { value: 'leiden', label: 'Leiden' }, { value: 'lpa', label: 'Label Propagation' }, { value: 'best_modularity', label: 'Best modularity (automatic)' }]} /></Field>
               <h3>Tiers</h3>

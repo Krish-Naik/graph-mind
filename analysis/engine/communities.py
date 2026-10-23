@@ -1,11 +1,15 @@
-"""Step 5: community detection (+ benchmark metrics).
+"""Community detection (+ benchmark metrics).
 
-Louvain           : networkx (always available)
-Leiden            : `leidenalg` (fast, reference implementation) when it is installed, otherwise a
-                    self-contained pure-Python Leiden (modularity) implemented below. The app
-                    therefore never loses Leiden just because igraph/leidenalg have no wheel for
-                    your Python version (this was the case on Python 3.14).
-Label Propagation : networkx
+Louvain           : networkx, resolution gamma = 1 (the standard modularity optimum; reproduces the notebook).
+Leiden            : `leidenalg` when installed, otherwise the self-contained pure-Python Leiden below.
+                    It has its OWN, visible resolution parameter (`leiden_resolution`). Why: at gamma = 1 Leiden
+                    and Louvain maximise the very same function (modularity) and on well-separated graphs they land
+                    on practically the same partition, so a side-by-side comparison would be a carbon copy.
+                    A higher gamma makes Leiden look for finer communities, which gives a genuinely different
+                    (and honestly labelled) result. Set it to 1.0 to get the textbook Leiden.
+Label Propagation : networkx.
+
+Every algorithm's modularity is reported at gamma = 1 so the numbers are directly comparable.
 """
 from __future__ import annotations
 import math
@@ -15,9 +19,7 @@ import networkx.algorithms.community as nx_comm
 from sklearn.metrics import normalized_mutual_info_score
 
 NAMES = {"louvain": "Louvain", "leiden": "Leiden", "lpa": "Label Propagation"}
-
-# which implementation produced the last Leiden result (reported to the UI)
-LEIDEN_BACKEND = {"name": None}
+DEFAULT_LEIDEN_RESOLUTION = 1.5
 
 
 # ---------------------------------------------------------------------------------------------
@@ -35,15 +37,20 @@ def _lpa(G, seed):
 # ---------------------------------------------------------------------------------------------
 # Leiden
 # ---------------------------------------------------------------------------------------------
-def _leiden_leidenalg(G, seed):
+def _leiden_leidenalg(G, seed, resolution: float = 1.0):
     import igraph as ig
     import leidenalg
     nodes = list(G.nodes())
     idx = {n: i for i, n in enumerate(nodes)}
     g = ig.Graph(n=len(nodes), edges=[(idx[u], idx[v]) for u, v in G.edges()])
     g.es["weight"] = [d["weight"] for _, _, d in G.edges(data=True)]
-    part = leidenalg.find_partition(g, leidenalg.ModularityVertexPartition,
-                                    weights="weight", seed=seed)
+    # RBConfiguration gamma = 1 is modularity; gamma > 1 favours more, tighter communities.
+    # n_iterations = -1: keep iterating until the partition no longer improves.
+    part = leidenalg.find_partition(
+        g, leidenalg.RBConfigurationVertexPartition,
+        weights="weight", seed=seed, n_iterations=-1,
+        resolution_parameter=float(resolution),
+    )
     return [{nodes[i] for i in comm} for comm in part]
 
 
@@ -196,43 +203,53 @@ def leiden_pure(G, seed: int = 42, resolution: float = 1.0, theta: float = 0.01,
     return list(groups.values())
 
 
-def _leiden(G, seed):
+def _leiden(G, seed, resolution: float = DEFAULT_LEIDEN_RESOLUTION):
+    """Return (communities, backend_name). leidenalg first, built-in Python otherwise."""
     try:
-        out = _leiden_leidenalg(G, seed)
-        LEIDEN_BACKEND["name"] = "leidenalg"
-        return out
-    except Exception:                            # not installed / no wheel / failed -> built-in
-        LEIDEN_BACKEND["name"] = "built-in Python"
-        return leiden_pure(G, seed)
+        return _leiden_leidenalg(G, seed, resolution), "leidenalg"
+    except Exception:
+        return leiden_pure(G, seed, resolution=resolution), "built-in Python"
 
 
-RUNNERS = {"louvain": _louvain, "leiden": _leiden, "lpa": _lpa}
-
-
-def detect(G: nx.Graph, algorithms: list[str], seed: int = 42, true_labels=None):
+def detect(G: nx.Graph, algorithms: list[str], seed: int = 42, true_labels=None,
+           leiden_resolution: float = DEFAULT_LEIDEN_RESOLUTION):
     """Return (results, benchmark_rows). results[name] = list[set(node)]."""
-    results, rows = {}, []
+    results, failed, meta = {}, [], {}
     for name in algorithms:
         try:
-            comms = RUNNERS[name](G, seed)
+            if name == "leiden":
+                results[name], backend = _leiden(G, seed, leiden_resolution)
+                meta[name] = {"backend": backend, "resolution": float(leiden_resolution)}
+            elif name == "louvain":
+                results[name] = _louvain(G, seed)
+                meta[name] = {"resolution": 1.0}
+            else:
+                results[name] = _lpa(G, seed)
         except Exception as exc:  # one failing algorithm must not kill the run
-            rows.append({"algorithm": NAMES[name], "key": name, "error": str(exc)})
+            failed.append({"algorithm": NAMES[name], "key": name, "error": str(exc)})
+    rows = []
+    for name in algorithms:
+        hit = next((r for r in failed if r["key"] == name), None)
+        if hit:
+            rows.append(hit)
             continue
-        results[name] = comms
+        if name not in results:
+            continue
+        comms = results[name]
         row = {
             "algorithm": NAMES[name], "key": name,
             "num_communities": len(comms),
+            # always evaluated at gamma = 1 so Louvain / Leiden / LPA can be compared fairly
             "modularity": round(float(nx_comm.modularity(G, comms, weight="weight")), 6),
             "nmi": None,
         }
-        if name == "leiden" and LEIDEN_BACKEND["name"]:
-            row["backend"] = LEIDEN_BACKEND["name"]
+        row.update(meta.get(name, {}))
         if true_labels is not None:
             node_to_c = {n: i for i, c in enumerate(comms) for n in c}
-            order = list(G.nodes())
-            mask = [true_labels.get(n) is not None and str(true_labels.get(n)) != "nan" for n in order]
-            y_true = [true_labels[n] for n, ok in zip(order, mask) if ok]
-            y_pred = [node_to_c[n] for n, ok in zip(order, mask) if ok]
+            order_n = list(G.nodes())
+            mask = [true_labels.get(n) is not None and str(true_labels.get(n)) != "nan" for n in order_n]
+            y_true = [true_labels[n] for n, ok in zip(order_n, mask) if ok]
+            y_pred = [node_to_c[n] for n, ok in zip(order_n, mask) if ok]
             if len(set(y_true)) > 1:
                 row["nmi"] = round(float(normalized_mutual_info_score(y_true, y_pred)), 6)
         rows.append(row)
