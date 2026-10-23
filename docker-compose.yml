@@ -1,0 +1,10 @@
+# Only MongoDB for now:  docker compose up -d mongo
+# (Containers for the engine/server/client come in the polish step.)
+services:
+  mongo:
+    image: mongo:latest
+    restart: unless-stopped
+    ports: ["27017:27017"]
+    volumes: [mongo_data:/data/db]
+volumes:
+  mongo_data:

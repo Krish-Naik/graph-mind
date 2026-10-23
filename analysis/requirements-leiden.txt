@@ -1,0 +1,4 @@
+# Optional: enables the Leiden algorithm. If this fails to install, the app still works
+# (Louvain + Label Propagation); Leiden is just reported as unavailable in the benchmark.
+python-igraph>=0.11
+leidenalg>=0.10

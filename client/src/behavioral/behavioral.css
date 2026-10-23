@@ -1,0 +1,77 @@
+/* Styles for the behavioral results dashboard. Imported by Results.jsx, nothing else to edit. */
+.viz-section { margin-top: 22px; }
+.viz-section > h2 { margin-bottom: 2px; }
+.viz-sub { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+.viz-how { background: #f8fafc; border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; font-size: 13px; color: #334155; margin: 10px 0 14px; line-height: 1.5; }
+.viz-how b { color: var(--ink); }
+
+/* pipeline flow */
+.flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+@media (max-width: 900px) { .flow { grid-template-columns: 1fr; } }
+.flow .stepbox { background: #fff; border: 1px solid var(--line); border-top: 3px solid var(--brand); border-radius: 10px; padding: 10px 12px; font-size: 12px; color: #475569; line-height: 1.45; }
+.flow .stepbox b { display: block; color: var(--ink); font-size: 13px; margin-bottom: 4px; }
+.funnel { margin-top: 14px; display: grid; gap: 6px; }
+.funnel .bar { height: 22px; border-radius: 6px; background: linear-gradient(90deg, #2563eb, #60a5fa); color: #fff; font-size: 12px; font-weight: 600; display: flex; align-items: center; padding: 0 10px; white-space: nowrap; min-width: 150px; transition: width .4s; }
+
+/* chips / toggles */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { background: #fff; color: var(--ink); border-radius: 0; padding: 5px 12px; font-size: 12px; font-weight: 600; border-right: 1px solid var(--line); }
+.seg button:last-child { border-right: 0; }
+.seg button.on { background: var(--brand); color: #fff; }
+.seg button:hover:not(.on):not(:disabled) { background: #f1f5f9; }
+.selchip { display: inline-flex; align-items: center; gap: 8px; background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; border-radius: 99px; padding: 3px 6px 3px 12px; font-size: 12px; font-weight: 600; }
+.selchip button { background: #1e40af; padding: 1px 8px; border-radius: 99px; font-size: 12px; }
+
+/* tier donut + legend */
+.tierlist { display: grid; gap: 8px; }
+.tieritem { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; background: #fff; transition: .12s; }
+.tieritem:hover { background: #f8fafc; }
+.tieritem.on { border-color: var(--brand); box-shadow: 0 0 0 2px #bfdbfe; }
+.tieritem.dim { opacity: .45; }
+.tieritem .dotc { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+.tieritem .nm { font-weight: 600; font-size: 13px; flex: 1; }
+.tieritem .ct { font-size: 12px; color: var(--muted); text-align: right; }
+
+/* tooltips */
+.vtip { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 6px 20px rgba(15,23,42,.12); line-height: 1.5; max-width: 260px; }
+.vtip b { display: block; margin-bottom: 2px; }
+
+/* heatmap */
+.hm { border-collapse: separate; border-spacing: 2px; font-size: 11px; width: auto; margin: 0 auto; }
+.hm th, .hm td { border: 0; padding: 0; background: none; position: static; }
+.hm thead th { height: 110px; vertical-align: bottom; font-weight: 600; color: #334155; }
+.hm thead th span { display: inline-block; writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; max-height: 108px; overflow: hidden; text-overflow: ellipsis; }
+.hm tbody th { text-align: right; padding-right: 8px; white-space: nowrap; font-weight: 600; color: #334155; cursor: pointer; }
+.hm td.cell { width: 30px; min-width: 30px; height: 26px; border-radius: 4px; cursor: pointer; text-align: center; font-size: 10px; }
+.hm td.cell:hover { outline: 2px solid #0f172a; }
+.hm tr.sel th { color: var(--brand); text-decoration: underline; }
+.hm tr.dim { opacity: .3; }
+.hmscale { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); margin-top: 8px; }
+.hmscale i { width: 160px; height: 10px; border-radius: 5px; background: linear-gradient(90deg, rgba(234,88,12,.9), #f8fafc, rgba(37,99,235,.9)); display: inline-block; }
+.hmscale i.share { background: linear-gradient(90deg, #f8fafc, rgba(37,99,235,1)); }
+.hminfo { min-height: 22px; font-size: 13px; margin-top: 8px; color: #0f172a; }
+
+/* table */
+.ctable th { cursor: pointer; user-select: none; } .ctable th:hover { background: #eef2f7; }
+.ctable tr.crow { cursor: pointer; } .ctable tr.crow:hover td { background: #f8fafc; }
+.ctable tr.crow.sel td { background: #eff6ff; }
+.minibar { display: inline-block; height: 6px; border-radius: 3px; background: #93c5fd; vertical-align: middle; margin-left: 8px; }
+
+/* community detail */
+.detail { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: #fff; }
+.detail h3 { display: flex; align-items: center; gap: 8px; }
+.kv { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 10px 0; }
+.kv div { background: #f8fafc; border-radius: 8px; padding: 6px 10px; } .kv b { display: block; font-size: 15px; } .kv span { font-size: 11px; color: var(--muted); }
+.hbar { display: grid; grid-template-columns: 120px 1fr 64px; gap: 8px; align-items: center; font-size: 12px; margin: 4px 0; }
+.hbar .track { background: #f1f5f9; border-radius: 4px; height: 12px; overflow: hidden; } .hbar .fill { height: 100%; background: var(--brand); border-radius: 4px; }
+.hbar .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* graph */
+.graphwrap { position: relative; }
+.graphtip { position: absolute; pointer-events: none; z-index: 5; transform: translate(10px, -110%); }
+.toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+.toolbar input[type=text] { width: 170px; padding: 5px 9px; font-size: 12px; }
+.toolbar button { padding: 5px 12px; font-size: 12px; }
+
+.emptyviz { padding: 24px; text-align: center; color: var(--muted); font-size: 13px; background: #f8fafc; border: 1px dashed var(--line); border-radius: 10px; }
+.legend.click span { cursor: pointer; }
