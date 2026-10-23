@@ -31,7 +31,8 @@ vi.mock('../api.js', () => {
 import Home from '../pages/Home.jsx';
 import Dataset from '../pages/Dataset.jsx';
 import Results from '../behavioral/Results.jsx';
-import { toMapping, toParams, mappingReady } from '../behavioral/Wizard.jsx';
+import { toMapping, toParams, mappingReady, guessLabel } from '../behavioral/Wizard.jsx';
+import { alignColors, layoutClusters } from '../behavioral/viz.js';
 import { PRESETS } from '../presets.js';
 
 beforeEach(cleanup);
@@ -49,8 +50,18 @@ describe('pages render without crashing', () => {
     expect(screen.getByText('297')).toBeTruthy();                       // connected nodes
     expect(screen.getByText('2,544')).toBeTruthy();                     // edges
     expect(screen.getAllByText('High Engagement').length).toBeGreaterThan(0);
-    expect(screen.getByText('Louvain')).toBeTruthy();
+    expect(screen.getAllByText('Louvain').length).toBeGreaterThan(0);
     expect(screen.getByText(/Download classified CSV/)).toBeTruthy();
+  });
+
+  it('Results dashboard has community-detection graphs, modularity and NMI for all three algorithms', async () => {
+    render(<Results jobId="j1" />);
+    await waitFor(() => expect(screen.getByText('Results')).toBeTruthy());
+    expect(screen.getByText('Community detection graphs')).toBeTruthy();
+    expect(screen.getAllByText('Leiden').length).toBeGreaterThan(0);          // Leiden is present (graph panel + tables)
+    expect(screen.getAllByText('Modularity').length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/0\.5905|0\.59048/).length).toBeGreaterThan(0); // Leiden modularity is visible
+    expect(screen.getAllByText(/0\.0536/).length).toBeGreaterThan(0);          // Leiden NMI is visible
   });
 
   it('Dataset page: overview, graphical tab, behavioral wizard with OULAD preset', async () => {
@@ -58,6 +69,7 @@ describe('pages render without crashing', () => {
     await waitFor(() => expect(screen.getByText('Columns')).toBeTruthy());
     fireEvent.click(screen.getByText('Graphical analysis'));
     await waitFor(() => expect(screen.getByText('Distribution of x')).toBeTruthy());
+    expect(screen.getByText('Community detection graphs')).toBeTruthy();       // also shown in the graphical analysis tab
     expect(screen.getByText('Chart builder')).toBeTruthy();
     fireEvent.click(screen.getByText('Behavioral analysis'));
     await waitFor(() => expect(screen.getByText(/Recognised/)).toBeTruthy());
@@ -93,5 +105,38 @@ describe('mapping logic', () => {
     expect(mappingReady({ mainFileId: 'f1', format: 'long', entity_col: 'u', behavior_col: '', agg: 'sum', value_col: '', useLookup: false, useLabel: false, feature_cols: [] })).toBe(false);
     const p = toParams({ sample_size: '300', graph_method: 'threshold', threshold: '0.85', knn_k: '10', algorithms: ['louvain'], primary_algorithm: 'louvain', tier_method: 'quantile', tier_labels: ['a', 'b', 'c'], low_cut: '', high_cut: '', min_community_size: '1' });
     expect(p.sample_size).toBe(300); expect(p.threshold).toBe(0.85);
+  });
+});
+
+describe('community graph helpers', () => {
+  it('guessLabel finds final_result in another file without a preset', () => {
+    const files = [{ id: 'f1' }, { id: 'f2' }, { id: 'f3' }];
+    const col = (name, numeric, d) => ({ name, numeric, approx_distinct: d });
+    const profiles = {
+      f1: { columns: [col('id_student', true, 500), col('sum_click', true, 80)] },
+      f2: { columns: [col('id_site', true, 6000), col('activity_type', false, 20)] },
+      f3: { columns: [col('id_student', true, 32000), col('gender', false, 2), col('final_result', false, 4)] },
+    };
+    expect(guessLabel(files, profiles, 'id_student', 'f1')).toEqual({ fileId: 'f3', entity_col: 'id_student', label_col: 'final_result' });
+    expect(guessLabel(files.slice(0, 2), profiles, 'id_student', 'f1')).toBeNull();
+  });
+
+  it('alignColors keeps the colour of the same group across algorithms', () => {
+    const ref = [0, 0, 0, 1, 1, 2];
+    const other = [5, 5, 5, 3, 3, 4];                 // same groups, different ids
+    const { colorOf: a } = alignColors(null, ref);
+    const { colorOf: b } = alignColors(ref, [2, 2, 2, 1, 1, 0]);
+    expect(b[2]).toBe(a[0]); expect(b[1]).toBe(a[1]); expect(b[0]).toBe(a[2]);
+    expect(other.length).toBe(6);
+  });
+
+  it('layoutClusters gives every node a position and keeps communities apart', () => {
+    const nodes = Array.from({ length: 60 }, (_, i) => ({ id: String(i), total: i }));
+    const membership = nodes.map((_, i) => Math.floor(i / 20));
+    const pos = layoutClusters(nodes, membership, [{ source: '0', target: '25', weight: 1 }]);
+    expect(pos.size).toBe(60);
+    const c = (g) => { const p = [...Array(20).keys()].map((k) => pos.get(String(g * 20 + k))); return { x: p.reduce((s, q) => s + q.x, 0) / 20, y: p.reduce((s, q) => s + q.y, 0) / 20 }; };
+    const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    expect(d(c(0), c(1))).toBeGreaterThan(40); expect(d(c(1), c(2))).toBeGreaterThan(40);
   });
 });

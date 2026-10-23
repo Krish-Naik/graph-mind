@@ -6,6 +6,7 @@ import DataTable from '../components/DataTable.jsx';
 import AutoCharts from '../components/AutoCharts.jsx';
 import ChartBuilder from '../components/ChartBuilder.jsx';
 import Wizard from '../behavioral/Wizard.jsx';
+import { RunCommunityGraphs } from '../behavioral/CommunityGraphs.jsx';
 import Results from '../behavioral/Results.jsx';
 import { bytes, num } from '../util.js';
 
@@ -84,6 +85,7 @@ export default function Dataset() {
       {tab === 'overview' && (profile ? <Overview profile={profile} /> : <div className="row"><span className="spinner" /> Profiling {file?.originalName}...</div>)}
       {tab === 'explore' && (profile ? (
         <>
+          <RunCommunityGraphs key={`cg${id}`} datasetId={id} onGoBehavioral={() => setTab('behavioral')} />
           <AutoCharts key={fileId} datasetId={id} fileId={fileId} />
           <ChartBuilder key={`b${fileId}`} datasetId={id} fileId={fileId} columns={profile.columns} />
         </>

@@ -223,78 +223,117 @@ export function AlgorithmComparisonCharts({ algorithmComparison, benchmark }) {
 /* 2.  NMI ANALYSIS                                                          */
 /* ======================================================================== */
 export function NMIAnalysisChart({ nmiAnalysis, benchmark }) {
-  if (!nmiAnalysis || !nmiAnalysis.available) {
-    return (
-      <div className="emptyviz">
-        {nmiAnalysis?.reason ||
-          'NMI analysis requires a label column. Add a label file in the behavioral wizard (Step 1 → Label column).'}
-      </div>
-    );
-  }
+  const hasLabel = !!nmiAnalysis?.available;
+  const pair = nmiAnalysis?.pairwise_agreement;
 
-  const algoData = Object.entries(nmiAnalysis.nmi_by_algorithm || {}).map(([k, v]) => ({
-    algo: ALGO_LABELS[k] || k,
-    key: k,
-    nmi: v ?? 0,
+  // every algorithm that ran gets a row, even if NMI vs label is unavailable for it
+  const rows = (benchmark || []).map((b) => ({
+    key: b.key, algo: ALGO_LABELS[b.key] || b.algorithm, nmi: b.nmi ?? nmiAnalysis?.nmi_by_algorithm?.[b.key] ?? null,
+    error: b.error, communities: b.num_communities,
   }));
-
-  const sweepData = nmiAnalysis.nmi_vs_min_community_size || [];
-
-  const labelDist = Object.entries(nmiAnalysis.label_distribution || {})
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 15)
-    .map(([name, count]) => ({ name, count }));
+  const algoData = rows.filter((r) => r.nmi != null).map((r) => ({ algo: r.algo, key: r.key, nmi: r.nmi }));
+  const sweepData = nmiAnalysis?.nmi_vs_min_community_size || [];
+  const labelDist = Object.entries(nmiAnalysis?.label_distribution || {})
+    .sort((a, b) => b[1] - a[1]).slice(0, 15).map(([name, count]) => ({ name, count }));
+  const cont = nmiAnalysis?.contingency;
+  const LABEL_COLORS = ['#2563eb', '#f97316', '#16a34a', '#dc2626', '#9333ea', '#0891b2', '#db2777', '#65a30d'];
 
   return (
     <div>
       <div className="muted small" style={{ marginBottom: 12 }}>
-        Normalised Mutual Information (NMI) measures agreement between detected communities and the ground-truth label column.
-        A score of 1 means perfect agreement; near-0 is typical because community detection finds <em>behavioral patterns</em>, not label categories.
+        Normalised Mutual Information (NMI) measures how much two groupings agree: 1 = identical, 0 = unrelated.
+        Below, it compares the algorithms with <em>each other</em> (always available) and with your <em>label column</em> (when one is used).
       </div>
 
-      <div className="grid g2" style={{ gap: 16, alignItems: 'start' }}>
-        {/* NMI by algorithm */}
-        <div>
-          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>NMI per algorithm</div>
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={algoData} margin={{ top: 8, right: 16, bottom: 16, left: 10 }}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="algo" tick={{ fontSize: 12 }} />
-              <YAxis domain={[0, 1]} tick={{ fontSize: 11 }} label={{ value: 'NMI', angle: -90, position: 'insideLeft', fontSize: 11 }} />
-              <Tooltip formatter={(v) => [nice(v, 4), 'NMI']} />
-              <Bar dataKey="nmi" name="NMI" radius={[4, 4, 0, 0]}>
-                {algoData.map((d) => <Cell key={d.key} fill={ALGO_COLORS[d.key] || '#94a3b8'} />)}
-              </Bar>
-              <ReferenceLine y={0.3} stroke="#f59e0b" strokeDasharray="5 4" label={{ value: '0.3 = meaningful', position: 'insideTopRight', fontSize: 10, fill: '#92400e' }} />
-            </BarChart>
-          </ResponsiveContainer>
-          <p className="muted small">Values above 0.3 indicate the communities align meaningfully with the label.</p>
+      {/* ---- vs the label ---- */}
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>NMI against the label column</div>
+      <div className="tablewrap" style={{ maxHeight: 200, marginBottom: 12 }}>
+        <table>
+          <thead><tr><th>Algorithm</th><th>Communities</th><th>NMI vs label</th></tr></thead>
+          <tbody>{rows.map((r) => (
+            <tr key={r.key}>
+              <td><span className="dot-algo" style={{ background: ALGO_COLORS[r.key] || '#94a3b8' }} />{r.algo}</td>
+              <td>{r.communities ?? '—'}</td>
+              <td>{r.error ? <span className="muted" title={r.error}>algorithm failed</span> : r.nmi != null ? <b>{nice(r.nmi, 4)}</b> : <span className="muted">no label used</span>}</td>
+            </tr>))}</tbody>
+        </table>
+      </div>
+      {!hasLabel && (
+        <div className="alert info">{nmiAnalysis?.reason || 'No label column was used, so NMI against a ground truth is not available.'}</div>
+      )}
+      {hasLabel && (
+        <div className="grid g2" style={{ gap: 16, alignItems: 'start', marginBottom: 8 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>NMI per algorithm</div>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={algoData} margin={{ top: 8, right: 16, bottom: 16, left: 10 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="algo" tick={{ fontSize: 12 }} />
+                <YAxis domain={[0, 1]} tick={{ fontSize: 11 }} label={{ value: 'NMI', angle: -90, position: 'insideLeft', fontSize: 11 }} />
+                <Tooltip formatter={(v) => [nice(v, 4), 'NMI']} />
+                <Bar dataKey="nmi" name="NMI" radius={[4, 4, 0, 0]}>
+                  {algoData.map((d) => <Cell key={d.key} fill={ALGO_COLORS[d.key] || '#94a3b8'} />)}
+                </Bar>
+                <ReferenceLine y={0.3} stroke="#f59e0b" strokeDasharray="5 4" label={{ value: '0.3 = meaningful', position: 'insideTopRight', fontSize: 10, fill: '#92400e' }} />
+              </BarChart>
+            </ResponsiveContainer>
+            <p className="muted small">Low values are normal here: communities follow behavior patterns, which need not match the label (e.g. pass / fail).</p>
+          </div>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Label class distribution</div>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={labelDist} margin={{ top: 8, right: 8, bottom: 30, left: 10 }} layout="vertical">
+                <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 10 }} />
+                <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={90} />
+                <Tooltip formatter={(v) => [v, 'entities']} />
+                <Bar dataKey="count" fill="#2563eb" opacity={0.75} radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
         </div>
+      )}
 
-        {/* Label distribution */}
-        <div>
-          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Label class distribution</div>
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={labelDist} margin={{ top: 8, right: 8, bottom: 30, left: 10 }} layout="vertical">
+      {/* ---- between algorithms: always there ---- */}
+      {pair?.keys?.length > 1 && (
+        <div style={{ marginTop: 18 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Agreement between the algorithms (NMI)</div>
+          <div className="muted small" style={{ marginBottom: 8 }}>Needs no label. Close to 1 means two algorithms found almost the same communities, which is a good sign that the structure is real and not an accident of one method.</div>
+          <table className="nmi-matrix">
+            <thead><tr><th />{pair.keys.map((k) => <th key={k}>{ALGO_LABELS[k] || k}</th>)}</tr></thead>
+            <tbody>{pair.keys.map((a, i) => (
+              <tr key={a}><th>{ALGO_LABELS[a] || a}</th>
+                {pair.keys.map((b, j) => {
+                  const v = pair.matrix[i][j];
+                  return <td key={b} style={{ background: `rgba(37,99,235,${0.08 + 0.8 * v})`, color: v > 0.6 ? '#fff' : '#0f172a' }}>{nice(v, 3)}</td>;
+                })}</tr>))}</tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ---- community x label ---- */}
+      {hasLabel && cont?.rows?.length > 0 && (
+        <div style={{ marginTop: 22 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>What is inside each community? ({ALGO_LABELS[cont.algorithm] || cont.algorithm})</div>
+          <div className="muted small" style={{ marginBottom: 8 }}>Each bar is a community, split by label class. If NMI were high, every bar would be mostly one colour.</div>
+          <ResponsiveContainer width="100%" height={Math.max(220, 24 * cont.rows.length + 60)}>
+            <BarChart layout="vertical" data={cont.rows.map((r) => ({ id: `C${r.community_id}`, ...r.counts }))} margin={{ top: 4, right: 16, bottom: 4, left: 10 }} stackOffset="expand">
               <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-              <XAxis type="number" tick={{ fontSize: 10 }} />
-              <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={80} />
-              <Tooltip formatter={(v) => [v, 'entities']} />
-              <Bar dataKey="count" fill="#2563eb" opacity={0.75} radius={[0, 4, 4, 0]} />
+              <XAxis type="number" tickFormatter={(v) => `${Math.round(v * 100)}%`} tick={{ fontSize: 10 }} />
+              <YAxis type="category" dataKey="id" tick={{ fontSize: 10 }} width={36} />
+              <Tooltip />
+              <Legend />
+              {cont.labels.map((l, i) => <Bar key={l} dataKey={l} stackId="a" fill={LABEL_COLORS[i % LABEL_COLORS.length]} />)}
             </BarChart>
           </ResponsiveContainer>
         </div>
-      </div>
+      )}
 
-      {/* NMI vs min community size sweep */}
-      {sweepData.length > 1 && (
+      {/* ---- NMI vs min community size ---- */}
+      {hasLabel && sweepData.length > 1 && (
         <div style={{ marginTop: 20 }}>
-          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>
-            NMI vs minimum community size (primary algorithm)
-          </div>
-          <div className="muted small" style={{ marginBottom: 8 }}>
-            How does NMI change if we only score entities in communities larger than a threshold? Helps identify whether small outlier communities drag NMI down.
-          </div>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>NMI vs minimum community size ({ALGO_LABELS[nmiAnalysis.primary] || 'primary algorithm'})</div>
+          <div className="muted small" style={{ marginBottom: 8 }}>How does NMI change if only entities in communities above a size are scored? Shows whether tiny communities drag NMI down.</div>
           <ResponsiveContainer width="100%" height={240}>
             <LineChart data={sweepData} margin={{ top: 8, right: 24, bottom: 20, left: 10 }}>
               <CartesianGrid strokeDasharray="3 3" />

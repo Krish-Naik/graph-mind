@@ -51,6 +51,30 @@ export function mappingReady(m) {
   return true;
 }
 
+/**
+ * Find a ground-truth label automatically so NMI is available without clicking a preset.
+ * Looks in the OTHER files of the dataset for a small-cardinality column whose name sounds like a label
+ * (final_result, label, class, outcome, ...) next to a column with the same name as the entity column.
+ */
+const LABEL_PATTERNS = [/final_?result/i, /^(label|target|class|outcome)$/i, /(label|target|outcome|class)/i, /(result|status|grade|segment|churn)/i];
+export function guessLabel(files, profiles, entityCol, mainFileId) {
+  let best = null;
+  for (const f of files) {
+    if (f.id === mainFileId) continue;
+    const cols = profiles[f.id]?.columns;
+    if (!cols || !cols.some((c) => c.name === entityCol)) continue;
+    for (const c of cols) {
+      if (c.name === entityCol) continue;
+      const rank = LABEL_PATTERNS.findIndex((re) => re.test(c.name));
+      if (rank < 0) continue;
+      const lim = c.numeric ? 10 : 30;
+      if (!(c.approx_distinct >= 2 && c.approx_distinct <= lim)) continue;
+      if (!best || rank < best.rank) best = { rank, fileId: f.id, entity_col: entityCol, label_col: c.name };
+    }
+  }
+  return best ? { fileId: best.fileId, entity_col: best.entity_col, label_col: best.label_col } : null;
+}
+
 function Select({ value, onChange, options, blank = 'choose...' }) {
   return (
     <select value={value || ''} onChange={(e) => onChange(e.target.value)}>
@@ -70,6 +94,7 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
   const [checkErr, setCheckErr] = useState(null);
   const [jobId, setJobId] = useState(null);
   const [runErr, setRunErr] = useState(null);
+  const [labelTouched, setLabelTouched] = useState(false);   // user decided about the label: stop auto-detecting
 
   const setMap = (patch) => setM((x) => ({ ...x, ...patch }));
   const cols = (fid) => profiles[fid]?.columns || [];
@@ -85,12 +110,19 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
     setM((x) => ({ ...x, entity_col: s.entity_col || '', behavior_col: s.behavior_col || '', value_col: s.value_col || '' }));
   }, [profiles, m.mainFileId, m.entity_col]);
 
+  // auto-detect a label column (e.g. studentInfo.csv -> final_result) so NMI shows up without a preset
+  useEffect(() => {
+    if (labelTouched || m.useLabel || !m.entity_col) return;
+    const g = guessLabel(files, profiles, m.entity_col, m.mainFileId);
+    if (g) setM((x) => (x.useLabel ? x : { ...x, useLabel: true, label: g }));
+  }, [files, profiles, m.entity_col, m.mainFileId, m.useLabel, labelTouched]);
+
   const behaviorCols = m.useLookup ? names(m.lookup.fileId) : names(m.mainFileId);
   const numericCols = cols(m.mainFileId).filter((c) => c.numeric).map((c) => c.name);
 
   function applyPreset(p) {
     const built = p.build(files);
-    setM(built.mapping); setParams((x) => ({ ...x, ...built.params })); setCheck(null);
+    setLabelTouched(true); setM(built.mapping); setParams((x) => ({ ...x, ...built.params })); setCheck(null);
   }
 
   async function goCheck() {
@@ -173,11 +205,13 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
                 </>
               )}
               <h3 style={{ marginTop: 8 }}>Ground-truth label (optional)</h3>
-              <div className="inline" style={{ marginBottom: 10 }}><input type="checkbox" id="ulab" checked={m.useLabel} onChange={(e) => setMap({ useLabel: e.target.checked })} />
+              <div className="inline" style={{ marginBottom: 10 }}><input type="checkbox" id="ulab" checked={m.useLabel} onChange={(e) => { setLabelTouched(true); setMap({ useLabel: e.target.checked }); }} />
                 <label htmlFor="ulab">Compare communities with a known label (adds NMI)</label></div>
+              {!m.useLabel && <div className="muted small" style={{ marginBottom: 8 }}>Without a label the NMI section still shows how much the algorithms agree with each other, but NMI against a ground truth (e.g. final_result) needs one.</div>}
               {m.useLabel && (
                 <>
-                  <Field label="Label file"><Select value={m.label.fileId} onChange={(v) => setMap({ label: { ...m.label, fileId: v } })} options={fileOpts} /></Field>
+                  {!labelTouched && <div className="alert ok" style={{ padding: '6px 10px' }}>Label detected automatically: <b>{m.label.label_col}</b>. Change or untick it below if it is not what you want.</div>}
+                  <Field label="Label file"><Select value={m.label.fileId} onChange={(v) => { setLabelTouched(true); setMap({ label: { ...m.label, fileId: v } }); }} options={fileOpts} /></Field>
                   <div className="grid g2">
                     <Field label="Entity column"><Select value={m.label.entity_col} onChange={(v) => setMap({ label: { ...m.label, entity_col: v } })} options={names(m.label.fileId)} /></Field>
                     <Field label="Label column"><Select value={m.label.label_col} onChange={(v) => setMap({ label: { ...m.label, label_col: v } })} options={names(m.label.fileId)} /></Field>

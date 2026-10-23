@@ -203,67 +203,198 @@ def _size_hist(sizes: list[int], bins: int = 10) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# NMI per algorithm AND per community-size bucket
+# Modularity: the full calculation, per algorithm
 # ---------------------------------------------------------------------------
 
-def nmi_analysis(results: dict, G: nx.Graph, true_labels: dict | None) -> dict:
+def _strength(q: float) -> str:
+    if q >= 0.5:
+        return "strong"
+    if q >= 0.3:
+        return "moderate"
+    if q > 0.0:
+        return "weak"
+    return "none"
+
+
+def _arrays(G: nx.Graph):
+    nodes = list(G.nodes())
+    idx = {n: i for i, n in enumerate(nodes)}
+    u = np.array([idx[a] for a, _ in G.edges()], dtype=int)
+    v = np.array([idx[b] for _, b in G.edges()], dtype=int)
+    w = np.array([d.get("weight", 1.0) for _, _, d in G.edges(data=True)], dtype=float)
+    deg = np.zeros(len(nodes))
+    np.add.at(deg, u, w)
+    np.add.at(deg, v, w)
+    return nodes, idx, u, v, w, deg
+
+
+def _q_from_labels(lab, u, v, w, deg, m):
+    """Weighted modularity Q = sum_c [ L_c/m - (d_c/2m)^2 ] for integer labels `lab`."""
+    intra = w[lab[u] == lab[v]].sum()
+    dc = np.bincount(lab, weights=deg)
+    return float(intra / m - ((dc / (2 * m)) ** 2).sum())
+
+
+def modularity_analysis(results: dict, G: nx.Graph, seed: int = 42, n_random: int = 50,
+                        resolutions=None) -> dict:
+    """Everything needed to SHOW how modularity was calculated.
+
+    For each algorithm:
+      Q (and a check against networkx), per-community terms
+        L_c/m   = share of all edge weight that lies INSIDE community c (observed)
+        (d_c/2m)^2 = share expected if edges were wired at random with the same degrees
+        contribution = observed - expected     ->  Q is the sum of the contributions
+      a random-label baseline (same community sizes, labels shuffled) so Q can be judged
+    Plus a resolution sweep (Louvain) = how Q and the number of communities react to gamma.
     """
-    Extended NMI analysis:
-    - nmi_by_algorithm: {algo -> nmi}
-    - nmi_by_community_size: for the best algorithm, how NMI changes as we only consider
-      communities above a size threshold (useful explainer)
-    - label_distribution: how many nodes per true-label class
-    """
-    if true_labels is None:
+    if G.number_of_edges() == 0:
         return {"available": False}
+    nodes, idx, u, v, w, deg = _arrays(G)
+    m = float(w.sum())
+    rng = np.random.default_rng(seed)
 
-    order = [n for n in G.nodes() if true_labels.get(n) is not None and str(true_labels.get(n)) != "nan"]
+    algos = []
+    for key, comms in results.items():
+        lab = np.zeros(len(nodes), dtype=int)
+        for ci, c in enumerate(comms):
+            for n in c:
+                lab[idx[n]] = ci
+        n_c = len(comms)
+        intra_c = np.zeros(n_c)
+        same = lab[u] == lab[v]
+        np.add.at(intra_c, lab[u][same], w[same])
+        dc = np.bincount(lab, minlength=n_c, weights=deg)
+        sizes = np.bincount(lab, minlength=n_c)
+        q = float((intra_c / m - (dc / (2 * m)) ** 2).sum())
+        rows = [{
+            "community_id": int(c), "size": int(sizes[c]),
+            "intra_weight": round(float(intra_c[c]), 4),
+            "degree_sum": round(float(dc[c]), 4),
+            "observed": round(float(intra_c[c] / m), 6),
+            "expected": round(float((dc[c] / (2 * m)) ** 2), 6),
+            "contribution": round(float(intra_c[c] / m - (dc[c] / (2 * m)) ** 2), 6),
+        } for c in range(n_c)]
+        # random baseline
+        rq = []
+        for _ in range(n_random):
+            rq.append(_q_from_labels(rng.permutation(lab), u, v, w, deg, m))
+        rq = np.array(rq)
+        try:
+            q_nx = float(nx_comm.modularity(G, comms, weight="weight"))
+        except Exception:
+            q_nx = None
+        algos.append({
+            "algorithm": key, "modularity": round(q, 6), "modularity_networkx": None if q_nx is None else round(q_nx, 6),
+            "strength": _strength(q), "num_communities": n_c,
+            "intra_weight_share": round(float(intra_c.sum() / m), 4),
+            "expected_share": round(float(((dc / (2 * m)) ** 2).sum()), 4),
+            "random_baseline": {"mean": round(float(rq.mean()), 6), "std": round(float(rq.std()), 6),
+                                "max": round(float(rq.max()), 6), "n": int(n_random)},
+            "communities": rows,
+        })
+
+    # --- resolution sweep (Louvain; fewer points on big graphs to keep the run fast) ---
+    if resolutions is None:
+        resolutions = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0] if G.number_of_edges() < 60000 else [0.5, 1.0, 2.0]
+    sweep = []
+    for g in resolutions:
+        try:
+            comms = nx_comm.louvain_communities(G, weight="weight", resolution=g, seed=seed)
+            lab = np.zeros(len(nodes), dtype=int)
+            for ci, c in enumerate(comms):
+                for n in c:
+                    lab[idx[n]] = ci
+            sweep.append({"resolution": float(g), "num_communities": len(comms),
+                          "modularity": round(_q_from_labels(lab, u, v, w, deg, m), 6)})
+        except Exception:
+            continue
+
+    return {"available": True, "total_weight": round(m, 4), "n_edges": int(len(w)),
+            "algorithms": algos, "resolution_sweep": sweep}
+
+
+# ---------------------------------------------------------------------------
+# NMI: against the label (when there is one) AND between the algorithms (always)
+# ---------------------------------------------------------------------------
+
+def _labels_of(communities, nodes):
+    node_to_c = {n: i for i, c in enumerate(communities) for n in c}
+    return [node_to_c[n] for n in nodes]
+
+
+def nmi_analysis(results: dict, G: nx.Graph, true_labels: dict | None, primary: str | None = None) -> dict:
+    """
+    - pairwise_agreement : NMI between every pair of algorithms. ALWAYS available (needs no label),
+                           so the NMI view is never empty.
+    - nmi_by_algorithm   : NMI of each algorithm vs the label column (needs a label)
+    - nmi_vs_min_community_size : NMI as small communities are excluded (primary algorithm)
+    - contingency        : community x label counts for the primary algorithm
+    - label_distribution : entities per label class
+    """
+    from sklearn.metrics import normalized_mutual_info_score as nmi
+
+    out: dict = {"available": False}
+    nodes = list(G.nodes())
+
+    # ---- between algorithms (no label needed) ----
+    keys = list(results.keys())
+    if len(keys) >= 1:
+        parts = {k: _labels_of(results[k], nodes) for k in keys}
+        mat = [[1.0 if a == b else round(float(nmi(parts[a], parts[b])), 4) for b in keys] for a in keys]
+        out["pairwise_agreement"] = {"keys": keys, "matrix": mat}
+
+    if true_labels is None:
+        out["reason"] = ("No label column was used, so NMI against a ground truth cannot be computed. "
+                         "Tick \"Compare communities with a known label\" in step 1 of the wizard "
+                         "(e.g. final_result in studentInfo.csv).")
+        return out
+
+    order = [n for n in nodes if true_labels.get(n) is not None and str(true_labels.get(n)) != "nan"]
     if len(order) < 5 or len(set(true_labels[n] for n in order)) < 2:
-        return {"available": False, "reason": "Not enough labelled nodes or only one class."}
-
-    from sklearn.metrics import normalized_mutual_info_score
+        out["reason"] = "Not enough labelled entities, or the label has only one class."
+        return out
 
     label_dist = {}
     for n in order:
-        v = str(true_labels[n])
-        label_dist[v] = label_dist.get(v, 0) + 1
+        label_dist[str(true_labels[n])] = label_dist.get(str(true_labels[n]), 0) + 1
 
     nmi_by_algo = {}
-    for algo_key, communities in results.items():
+    for key, communities in results.items():
         node_to_c = {n: i for i, c in enumerate(communities) for n in c}
         y_true = [true_labels[n] for n in order if n in node_to_c]
         y_pred = [node_to_c[n] for n in order if n in node_to_c]
-        if len(set(y_true)) >= 2 and len(y_pred) >= 2:
-            try:
-                nmi_by_algo[algo_key] = round(float(normalized_mutual_info_score(y_true, y_pred)), 6)
-            except Exception:
-                nmi_by_algo[algo_key] = None
+        try:
+            nmi_by_algo[key] = round(float(nmi(y_true, y_pred)), 6) if len(set(y_true)) >= 2 else None
+        except Exception:
+            nmi_by_algo[key] = None
 
-    # NMI vs minimum-community-size threshold (for the first valid algo)
-    nmi_vs_min_size = []
-    best_algo = next(iter(results)) if results else None
-    if best_algo:
-        communities = results[best_algo]
+    base = primary if primary in results else (next(iter(results)) if results else None)
+    sweep, cont = [], None
+    if base:
+        communities = results[base]
         node_to_c = {n: i for i, c in enumerate(communities) for n in c}
         all_sizes = sorted(set(len(c) for c in communities))
         for min_sz in sorted(set([1, 2, 3, 5, 10, 20] + all_sizes))[:20]:
-            big_comms = [c for c in communities if len(c) >= min_sz]
-            nodes_in = {n for c in big_comms for n in c}
-            yt = [true_labels[n] for n in order if n in node_to_c and n in nodes_in]
-            yp = [node_to_c[n] for n in order if n in node_to_c and n in nodes_in]
+            nodes_in = {n for c in communities if len(c) >= min_sz for n in c}
+            yt = [true_labels[n] for n in order if n in nodes_in]
+            yp = [node_to_c[n] for n in order if n in nodes_in]
             if len(set(yt)) >= 2 and len(yp) >= 5:
                 try:
-                    nmi_vs_min_size.append({
-                        "min_size": int(min_sz),
-                        "nodes_covered": int(len(yp)),
-                        "nmi": round(float(normalized_mutual_info_score(yt, yp)), 6),
-                    })
+                    sweep.append({"min_size": int(min_sz), "nodes_covered": int(len(yp)),
+                                  "nmi": round(float(nmi(yt, yp)), 6)})
                 except Exception:
                     pass
+        table = {}
+        for n in order:
+            table.setdefault(node_to_c[n], {})
+            lab = str(true_labels[n])
+            table[node_to_c[n]][lab] = table[node_to_c[n]].get(lab, 0) + 1
+        cont = {"algorithm": base, "labels": sorted(label_dist, key=lambda x: -label_dist[x]),
+                "rows": [{"community_id": int(c), "counts": cnt, "total": int(sum(cnt.values()))}
+                         for c, cnt in sorted(table.items(), key=lambda kv: -sum(kv[1].values()))]}
 
-    return {
-        "available": True,
-        "nmi_by_algorithm": nmi_by_algo,
-        "nmi_vs_min_community_size": nmi_vs_min_size,
-        "label_distribution": label_dist,
-    }
+    out.update({"available": True, "primary": base, "nmi_by_algorithm": nmi_by_algo,
+                "nmi_vs_min_community_size": sweep, "label_distribution": label_dist,
+                "contingency": cont})
+    out.pop("reason", None)
+    return out

@@ -4,6 +4,8 @@ import { api } from '../api.js';
 import { DEFAULT_TIERS, OUTLIER, num, tierColors } from '../util.js';
 import GraphView from './GraphView.jsx';
 import SimilarityChart from './SimilarityChart.jsx';
+import CommunityGraphs from './CommunityGraphs.jsx';
+import ModularityAnalysis from './ModularityAnalysis.jsx';
 import { CommunityBubble, CommunityDetail, EntityMap, PipelineFlow, ProfileHeatmap, TierBox, TierDonut } from './charts.jsx';
 import { AlgorithmComparisonCharts, NMIAnalysisChart, DensityAnalysisCharts } from './AdvancedCharts.jsx';
 import { isDimmed } from './viz.js';
@@ -146,8 +148,9 @@ function Dashboard({ job }) {
         <div className="card"><h2>Algorithm comparison</h2>
           <table><thead><tr><th>algorithm</th><th>communities</th><th>modularity</th><th>NMI vs label</th></tr></thead>
             <tbody>{r.benchmark.map((b) => (
-              <tr key={b.key}><td>{b.algorithm}</td><td>{b.num_communities ?? '-'}</td>
-                <td>{b.modularity ?? <span className="muted" title={b.error}>unavailable</span>}</td><td>{b.nmi ?? '-'}</td></tr>
+              <tr key={b.key}><td>{b.algorithm}{b.backend && <span className="muted small"> ({b.backend})</span>}</td><td>{b.num_communities ?? '-'}</td>
+                <td>{b.modularity ?? <span className="muted" title={b.error}>unavailable</span>}</td>
+                <td>{b.nmi ?? <span className="muted" title={r.has_label ? 'Not computable for this algorithm' : 'No label column used'}>{b.error ? '-' : r.has_label ? 'n/a' : 'no label'}</span>}</td></tr>
             ))}</tbody></table>
           {bench.length > 0 && (
             <ResponsiveContainer width="100%" height={200}>
@@ -156,11 +159,26 @@ function Dashboard({ job }) {
                 <Bar dataKey="nmi" fill="#f59e0b" /></BarChart>
             </ResponsiveContainer>
           )}
+          {bench.length < r.benchmark.length && <div className="alert warn" style={{ marginTop: 8 }}>{r.benchmark.filter((b) => b.error).map((b) => `${b.algorithm}: ${b.error}`).join(' · ')}</div>}
           <p className="muted small">Modularity: how well-separated the communities are (above 0.3 is meaningful, higher is better). NMI: agreement with the label column, if one was supplied; low values are normal because communities follow behavior, not the label. The darker bar is the algorithm used for the tiers.</p>
         </div>
       </div>
 
-      {/* ---- NEW ADVANCED SECTIONS ---- */}
+      <Section
+        title="Community detection graphs"
+        sub="The same similarity network, divided into communities by Louvain, Leiden and Label Propagation."
+        how="Each dot is an entity and each line a similarity link. Colour = community. With 'Clustered by community' every community is drawn as its own cluster, with the communities that are linked most placed next to each other. Colours are matched across algorithms: a cluster that keeps its colour in all three was found by every method.">
+        <CommunityGraphs result={r} />
+      </Section>
+
+      <Section
+        title="Modularity"
+        sub="How much more densely connected the communities are inside than chance would give, for each algorithm."
+        how="Q above 0.3 means real community structure, above 0.5 strong. The grey bars show what a random labelling of the same graph scores. 'Per community' shows which communities contribute most; 'Resolution sweep' shows how stable the result is.">
+        <ModularityAnalysis modularity={r.modularity_analysis} benchmark={r.benchmark} />
+      </Section>
+
+      {/* ---- ADVANCED SECTIONS ---- */}
       <Section
         title="Louvain vs Leiden vs Label Propagation"
         sub="Deep comparison of all community detection algorithms run on this graph."
@@ -170,8 +188,8 @@ function Dashboard({ job }) {
 
       <Section
         title="NMI Analysis"
-        sub="How well do the detected communities agree with the ground-truth label column?"
-        how="NMI (Normalised Mutual Information) = 1 means perfect agreement, ~0 is typical because communities group by behavior shape, not by final outcome. The sweep shows how NMI changes when we exclude tiny communities.">
+        sub="How well do the detected communities agree with a label column, and with each other?"
+        how="NMI (Normalised Mutual Information) = 1 means perfect agreement, 0 means unrelated. Against a label such as final_result, ~0.05-0.1 is typical because communities group by behavior shape, not by outcome. The algorithm-vs-algorithm matrix needs no label and tells you how consistent the detection is.">
         <NMIAnalysisChart nmiAnalysis={r.nmi_analysis} benchmark={r.benchmark} />
       </Section>
 

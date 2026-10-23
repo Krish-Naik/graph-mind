@@ -12,7 +12,8 @@ from .graph import scale, similarity, similarity_histogram, build_graph, thresho
 from .communities import detect, NAMES
 from .profiling import profile_communities, assign_tiers, OUTLIER, behavior_profile, community_stats
 from .eligibility import check_matrix
-from .graph_metrics import graph_density_metrics, algorithm_comparison, nmi_analysis, community_density_profile
+from .graph_metrics import (graph_density_metrics, algorithm_comparison, nmi_analysis,
+                            community_density_profile, modularity_analysis)
 
 
 MAX_BEHAVIORS_SHOWN = 25
@@ -123,7 +124,8 @@ def run(req: RunRequest) -> dict:
     # ---- NEW: graph density, algorithm comparison, NMI analysis ----
     density = graph_density_metrics(G, sim, ids)
     algo_cmp = algorithm_comparison(results, G)
-    nmi_ext = nmi_analysis(results, G, label_map)
+    nmi_ext = nmi_analysis(results, G, label_map, primary)
+    modu = modularity_analysis(results, G, p.random_state)
     primary_density_profile = {r["community_id"]: r for r in community_density_profile(G, comms)}
 
     return {
@@ -163,7 +165,26 @@ def run(req: RunRequest) -> dict:
         "graph_metrics": density,
         "algorithm_comparison": algo_cmp,
         "nmi_analysis": nmi_ext,
+        "modularity_analysis": modu,
+        # community id of every node, per algorithm, in the same order as graph.nodes
+        # (lets the UI draw a real community-detection graph for Louvain, Leiden and LPA)
+        "partitions": partitions_payload(results, G, bench),
+        "has_label": bool(label_map),
     }
+
+
+def partitions_payload(results: dict, G, bench: list) -> dict:
+    """{algorithm: {name, num_communities, modularity, nmi, backend, membership[]}} aligned with G.nodes()."""
+    nodes = list(G.nodes())
+    info = {b["key"]: b for b in bench if "modularity" in b}
+    out = {}
+    for key, comms in results.items():
+        node_to_c = {n: i for i, c in enumerate(comms) for n in c}
+        b = info.get(key, {})
+        out[key] = {"name": NAMES[key], "num_communities": len(comms), "modularity": b.get("modularity"),
+                    "nmi": b.get("nmi"), "backend": b.get("backend"),
+                    "membership": [int(node_to_c[n]) for n in nodes]}
+    return out
 
 
 def community_row(r, profile: dict, stats: dict, density_row: dict = None) -> dict:
