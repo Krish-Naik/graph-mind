@@ -9,6 +9,7 @@ import ModularityAnalysis from './ModularityAnalysis.jsx';
 import { CommunityBubble, CommunityDetail, EntityMap, PipelineFlow, ProfileHeatmap, TierBox, TierDonut } from './charts.jsx';
 import { AlgorithmComparisonCharts, NMIAnalysisChart, DensityAnalysisCharts } from './AdvancedCharts.jsx';
 import { isDimmed } from './viz.js';
+import { MetricGuide, RunConfig } from './ConfigPanels.jsx';
 import './behavioral.css';
 
 const Stat = ({ v, l }) => <div className="card stat" style={{ marginBottom: 0 }}><div className="v">{v}</div><div className="l">{l}</div></div>;
@@ -96,6 +97,9 @@ function Dashboard({ job }) {
           {r.diagnostics.map((d, i) => <div key={i} className={`alert ${d.level === 'warn' ? 'warn' : 'info'}`}>{d.text}</div>)}
         </div>
       )}
+
+      <MetricGuide result={r} />
+      <RunConfig job={job} />
 
       <Section title="How this result was produced" sub="The pipeline, with the real numbers of this run.">
         <PipelineFlow result={r} />

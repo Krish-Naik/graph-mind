@@ -5,12 +5,13 @@ import time
 from collections import Counter
 import numpy as np
 import pandas as pd
-from sklearn.metrics import normalized_mutual_info_score
 
 from .schemas import RunRequest, Mapping
-from .matrix import build_matrix, load_labels
-from .graph import scale, similarity, similarity_histogram, build_graph, threshold_sweep, embed_2d
-from .communities import detect, NAMES
+from .matrix import build_matrix, load_labels_with_report
+from .graph import (scale, similarity, similarity_histogram, build_graph, threshold_sweep, embed_2d,
+                    suggest_threshold, graph_construction_report)
+from .communities import detect, NAMES, partition_stability
+from .evaluation import evaluate_partition, nmi_score
 from .profiling import profile_communities, assign_tiers, OUTLIER, behavior_profile, community_stats
 from .eligibility import check_matrix
 from .graph_metrics import (graph_density_metrics, algorithm_comparison, nmi_analysis,
@@ -54,12 +55,20 @@ def run(req: RunRequest) -> dict:
     hist = similarity_histogram(sim)
     sweep = threshold_sweep(sim)
     G = build_graph(sim, ids, p.graph_method, p.threshold, p.knn_k)
+    gc = graph_construction_report(G, ids, sim)
     if G.number_of_nodes() < 3:
-        return {"status": "empty_graph", "eligibility": report, "similarity": hist,
-                "message": "Too few connected entities. Lower the threshold or use kNN graph."}
+        sug = suggest_threshold(sweep)
+        hint = (f" A threshold of about {sug:g} would keep at least 90% of the sampled entities connected."
+                if p.graph_method == "threshold" and sug is not None else "")
+        return {"status": "empty_graph", "eligibility": report, "similarity": hist, "sweep": sweep,
+                "graph_construction": gc, "suggested_threshold": sug,
+                "message": "Too few connected entities. Lower the threshold or use kNN graph." + hint}
 
-    labels = load_labels(m, mat.index) if m.label else None
-    label_map = labels.to_dict() if labels is not None else None
+    # Reference labels are loaded AFTER the graph exists and are only used to score finished partitions.
+    # They never influence similarity, graph construction or community detection (no leakage).
+    labels, label_report = load_labels_with_report(m, mat.index) if m.label else (None, None)
+    # {entity id: label} for entities with a usable label; {} = a label file was given but nothing matched
+    label_map = ({k: v for k, v in labels.items() if v is not None} if labels is not None else None)
 
     # 5. community detection + benchmark
     results, bench = detect(G, p.algorithms, p.random_state, label_map, p.leiden_resolution)
@@ -67,7 +76,7 @@ def run(req: RunRequest) -> dict:
         return {"status": "error", "message": "All community algorithms failed.", "benchmark": bench}
     ok_rows = [r for r in bench if "modularity" in r]
     if p.primary_algorithm == "best_modularity":
-        primary = max(ok_rows, key=lambda r: r["modularity"])["key"]
+        primary = max(ok_rows, key=lambda r: -1.0 if r["modularity"] is None else r["modularity"])["key"]
     else:
         primary = p.primary_algorithm if p.primary_algorithm in results else ok_rows[0]["key"]
     comms = results[primary]
@@ -127,6 +136,14 @@ def run(req: RunRequest) -> dict:
     algo_cmp = algorithm_comparison(results, G)
     nmi_ext = nmi_analysis(results, G, label_map, primary)
     modu = modularity_analysis(results, G, p.random_state)
+    stability = (partition_stability(G, primary, p.stability_runs, p.random_state, p.leiden_resolution)
+                 if p.stability_runs >= 2 and G.number_of_edges() <= 300_000 else {"available": False})
+    primary_eval = evaluate_partition(comms, label_map, list(G.nodes()), null_permutations=20, seed=p.random_state)
+    evaluation = {"has_label_spec": bool(m.label), "label_report": label_report,
+                  "population": {"sampled_entities": len(ids), "graph_entities": G.number_of_nodes(),
+                                 "labeled_in_graph": primary_eval["n_labeled"],
+                                 "evaluated": primary_eval["n_evaluated"], "coverage": primary_eval["coverage"]},
+                  "primary": primary_eval}
     primary_density_profile = {r["community_id"]: r for r in community_density_profile(G, comms)}
 
     return {
@@ -138,6 +155,8 @@ def run(req: RunRequest) -> dict:
             "connected_nodes": G.number_of_nodes(),
             "edges": G.number_of_edges(),
             "kept_pct_of_sample": round(100 * G.number_of_nodes() / len(ids), 1),
+            "dropped_entities": len(ids) - G.number_of_nodes(),
+            "graph_construction": gc,
             "communities": len(comms),
             "primary_algorithm": NAMES[primary],
             "graph_method": p.graph_method,
@@ -160,7 +179,8 @@ def run(req: RunRequest) -> dict:
         "macro_graph": {
             "nodes": [{"id": int(r.community_id), "size": int(r.community_size), "tier": r.tier} for r in prof.itertuples()],
             "edges": [{"source": a, "target": b, "weight": w} for (a, b), w in cross.items()]},
-        "diagnostics": diagnostics(prof, report, bool(label_map), bench, primary, tier_counts, p, results),
+        "diagnostics": diagnostics(prof, report, bool(m.label), bench, primary, tier_counts, p, results,
+                                   evaluation=evaluation, stability=stability, graph_report=gc),
         "outputs": {"classified_csv": csv_path},
         # ---- new analytics sections ----
         "graph_metrics": density,
@@ -170,7 +190,9 @@ def run(req: RunRequest) -> dict:
         # community id of every node, per algorithm, in the same order as graph.nodes
         # (lets the UI draw a real community-detection graph for Louvain, Leiden and LPA)
         "partitions": partitions_payload(results, G, bench),
-        "has_label": bool(label_map),
+        "has_label": bool(m.label),
+        "evaluation": evaluation,
+        "stability": stability,
     }
 
 
@@ -183,7 +205,7 @@ def partitions_payload(results: dict, G, bench: list) -> dict:
         node_to_c = {n: i for i, c in enumerate(comms) for n in c}
         b = info.get(key, {})
         out[key] = {"name": NAMES[key], "num_communities": len(comms), "modularity": b.get("modularity"),
-                    "nmi": b.get("nmi"), "backend": b.get("backend"), "resolution": b.get("resolution"),
+                    "nmi": b.get("nmi"), "ami": b.get("ami"), "backend": b.get("backend"), "resolution": b.get("resolution"),
                     "membership": [int(node_to_c[n]) for n in nodes]}
     return out
 
@@ -232,9 +254,43 @@ def pipeline_steps(n_total, n_sampled, G, comms, p, tier_counts, primary) -> lis
     ]
 
 
-def diagnostics(prof, report, has_labels, bench, primary, tier_counts=None, p=None, results=None) -> list[dict]:
+def diagnostics(prof, report, has_labels, bench, primary, tier_counts=None, p=None, results=None,
+                evaluation=None, stability=None, graph_report=None) -> list[dict]:
     """Plain-language caveats shown in the UI so results are interpreted honestly."""
     out = []
+    if graph_report and graph_report["entities_in"]:
+        kept = graph_report["entities_in_graph"] / graph_report["entities_in"]
+        if graph_report["entities_dropped"] and kept < 0.8:
+            out.append({"level": "warn", "text":
+                        f"Only {kept:.0%} of the sampled entities are in the graph "
+                        f"({graph_report['dropped_below_threshold']} had no peer above the threshold, "
+                        f"{graph_report['dropped_no_positive_similarity']} had no positive similarity at all). "
+                        "All community metrics describe only that connected subset."})
+        if graph_report["density"] > 0.5:
+            out.append({"level": "warn", "text":
+                        f"The graph is very dense ({graph_report['density']:.0%} of all possible edges): "
+                        "a higher threshold or a kNN graph will separate groups better."})
+    if stability and stability.get("available"):
+        if stability["pairwise_nmi_mean"] < 0.8:
+            out.append({"level": "warn", "text":
+                        f"The partition is not stable across random seeds (mean pairwise NMI "
+                        f"{stability['pairwise_nmi_mean']:.2f}, {stability['num_communities_min']}-"
+                        f"{stability['num_communities_max']} communities over {stability['runs']} runs). "
+                        "Treat individual community boundaries with caution."})
+    if evaluation and has_labels:
+        lr = evaluation.get("label_report") or {}
+        if lr.get("warning"):
+            out.append({"level": "warn", "text": lr["warning"]})
+        if lr.get("entities_ambiguous"):
+            out.append({"level": "info", "text":
+                        f"{lr['entities_ambiguous']} sampled entities have conflicting labels in the label file "
+                        "(the same id with different values, e.g. enrolled in several courses). They are excluded "
+                        "from the NMI evaluation instead of being given an arbitrary label."})
+        pop = evaluation["population"]
+        if pop["coverage"] is not None and pop["coverage"] < 0.8:
+            out.append({"level": "warn", "text":
+                        f"NMI was computed on {pop['evaluated']} of {pop['graph_entities']} graph entities "
+                        f"({pop['coverage']:.0%}); the rest have no usable label."})
     small = int((prof["community_size"] <= 2).sum())
     if small:
         out.append({"level": "warn", "text": f"{small} community(ies) have 2 or fewer members. "
@@ -263,7 +319,7 @@ def diagnostics(prof, report, has_labels, bench, primary, tier_counts=None, p=No
         n2c = lambda cs: {n: i for i, c in enumerate(cs) for n in c}
         a, b = n2c(lou), n2c(lei)
         keys = list(a)
-        agree = float(normalized_mutual_info_score([a[k] for k in keys], [b[k] for k in keys]))
+        agree = nmi_score([a[k] for k in keys], [b[k] for k in keys])
         gam = p.leiden_resolution if p is not None else 1.0
         txt = (f"Louvain and Leiden agree on {agree:.0%} (NMI between their partitions): "
                f"Louvain found {len(lou)} communities, Leiden (resolution {gam:g}) found {len(lei)}.")
@@ -278,10 +334,17 @@ def diagnostics(prof, report, has_labels, bench, primary, tier_counts=None, p=No
                 "Similarity uses cosine on min-max scaled values, so it compares the SHAPE of behavior (what people do), "
                 "while tiers use the MAGNITUDE (how much they do). A community can be 'similar' yet differ in volume."})
     row = next((r for r in bench if r.get("key") == primary), None)
-    if row and has_labels and row.get("nmi") is not None and row["nmi"] < 0.2:
-        out.append({"level": "info", "text": f"NMI vs. the label is low ({row['nmi']:.2f}). Communities group entities by "
-                    "behavior pattern, which need not coincide with the label (e.g. final result)."})
-    if row and row["modularity"] < 0.3:
+    if row and has_labels and row.get("nmi") is not None:
+        ami, null = row.get("ami"), row.get("nmi_null_mean")
+        chance = f" Shuffled labels give NMI {null:.3f} on average; AMI (chance-adjusted) is {ami:.3f}." if null is not None else ""
+        if row["nmi"] < 0.2:
+            out.append({"level": "info", "text": f"NMI vs. the label is low ({row['nmi']:.3f}).{chance} "
+                        "Communities group entities by behavior pattern, which need not coincide with the label "
+                        "(e.g. final result). Low NMI together with high modularity means the graph has real "
+                        "structure that this label does not describe."})
+    elif row and has_labels and row.get("nmi_reason"):
+        out.append({"level": "info", "text": f"NMI is not available: {row['nmi_reason']}"})
+    if row and row.get("modularity") is not None and row["modularity"] < 0.3:
         out.append({"level": "warn", "text": "Modularity is below 0.3: the graph has weak community structure. "
                     "Try a different threshold or the kNN graph."})
     out.extend({"level": "warn", "text": w} for w in report.get("warnings", []))

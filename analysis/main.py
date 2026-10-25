@@ -4,11 +4,13 @@ import re
 import shutil
 import zipfile
 from pathlib import Path
+from typing import Optional
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import RedirectResponse
-from engine.schemas import RunRequest, CheckRequest
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, RedirectResponse
+from engine.schemas import RunRequest, CheckRequest, Mapping, Params
 from engine import runner
-from engine.profile import profile_file
+from engine.profile import profile_file, validate_config
 from engine import charts
 from engine.charts import ChartSpec
 import pandas as pd
@@ -16,6 +18,30 @@ from pydantic import BaseModel
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "./data")).resolve()
 app = FastAPI(title="Behavioral Analytics Engine", version="0.1.0")
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(_, exc: RequestValidationError):
+    """Express shows `detail` as text, so a request-body problem must be ONE readable string
+    (FastAPI's default is a list of objects, which would arrive as '[object Object]')."""
+    errs = [{"field": ".".join(str(x) for x in e.get("loc", ())[1:]), "message": str(e.get("msg", "invalid value"))}
+            for e in exc.errors()]
+    text = "; ".join(f"{e['field']}: {e['message']}" if e["field"] else e["message"] for e in errs)
+    return JSONResponse(status_code=422, content={"detail": text or "Invalid request.", "errors": errs})
+
+
+class ValidateRequest(BaseModel):
+    mapping: Mapping
+    params: Optional[Params] = None
+
+
+def preflight(mapping: Mapping, params: Optional[Params] = None) -> dict:
+    """Validate the requested columns and parameters before any analysis. Blocking errors become a 422
+    whose detail is one readable string; warnings are returned to the caller."""
+    cfg = validate_config(mapping, params)
+    if cfg["errors"]:
+        raise HTTPException(422, " ".join(cfg["errors"]))
+    return cfg
 
 
 def safe(path: str) -> str:
@@ -48,14 +74,27 @@ def health():
 
 @app.post("/profile")
 def profile(body: dict):
+    if not isinstance(body.get("path"), str) or not body["path"]:
+        raise HTTPException(422, "A file path is required.")
     return profile_file(safe(body["path"]))
+
+
+@app.post("/behavioral/validate")
+def behavioral_validate(req: ValidateRequest):
+    """Dry run: report blocking errors and warnings for a mapping (+ optional parameters) without analysing."""
+    secure_mapping(req.mapping)
+    return validate_config(req.mapping, req.params)
 
 
 @app.post("/behavioral/check")
 def behavioral_check(req: CheckRequest):
     secure_mapping(req.mapping)
     try:
-        return runner.check(req.mapping, req.sample_size, req.random_state)
+        cfg = preflight(req.mapping)
+        rep = runner.check(req.mapping, req.sample_size, req.random_state)
+        rep["config"] = {"errors": cfg["errors"], "warnings": cfg["warnings"], "issues": cfg["issues"]}
+        rep["warnings"] = list(rep.get("warnings", [])) + [w for w in cfg["warnings"] if w not in rep.get("warnings", [])]
+        return rep
     except ValueError as e:
         raise HTTPException(422, str(e))
 
@@ -68,7 +107,13 @@ def behavioral_run(req: RunRequest):
         if DATA_DIR not in out.parents:
             raise HTTPException(400, "out_dir outside data directory.")
     try:
-        return runner.run(req)
+        cfg = preflight(req.mapping, req.params)
+        res = runner.run(req)
+        if isinstance(res, dict):
+            res["config"] = {"errors": cfg["errors"], "warnings": cfg["warnings"], "issues": cfg["issues"]}
+            if isinstance(res.get("diagnostics"), list):
+                res["diagnostics"] += [{"level": "warn", "text": w} for w in cfg["warnings"]]
+        return res
     except ValueError as e:
         raise HTTPException(422, str(e))
 

@@ -4,6 +4,8 @@ import numpy as np
 import networkx as nx
 import networkx.algorithms.community as nx_comm
 
+from .evaluation import canonical_label, evaluate_partition, nmi_score, MIN_EVALUATED, REASONS
+
 
 # ---------------------------------------------------------------------------
 # Graph-level density / topology
@@ -41,8 +43,8 @@ def graph_density_metrics(G: nx.Graph, sim: np.ndarray, ids: list) -> dict:
     # (avg path = unbiased estimate, diameter = lower bound), so big datasets stay fast.
     EXACT_LIMIT, N_SOURCES = 400, 120
     path_estimated = False
+    lcc = G.subgraph(max(components, key=len)).copy()
     try:
-        lcc = G.subgraph(max(components, key=len)).copy()
         if len(lcc) <= 1:
             diameter, avg_path = 1, 0.0
         elif len(lcc) <= EXACT_LIMIT:
@@ -73,7 +75,10 @@ def graph_density_metrics(G: nx.Graph, sim: np.ndarray, ids: list) -> dict:
 
     # Assortativity
     try:
-        assortativity = nx.degree_assortativity_coefficient(G)
+        with np.errstate(all="ignore"):
+            assortativity = nx.degree_assortativity_coefficient(G)
+        if not np.isfinite(assortativity):       # undefined (e.g. every node has the same degree): NaN is not valid JSON
+            assortativity = None
     except Exception:
         assortativity = None
 
@@ -81,7 +86,9 @@ def graph_density_metrics(G: nx.Graph, sim: np.ndarray, ids: list) -> dict:
     target = lcc if lcc_size < 1000 else G
     try:
         k_bc = None if target.number_of_nodes() <= 300 else 150      # sampled betweenness on larger graphs
-        bc_vals = list(nx.betweenness_centrality(target, k=k_bc, seed=42, weight="weight", normalized=True).values())
+        # hop-based (unweighted), consistent with diameter / avg path above. Passing weight="weight" would
+        # treat cosine SIMILARITY as a path LENGTH, i.e. strongest links would count as the longest.
+        bc_vals = list(nx.betweenness_centrality(target, k=k_bc, seed=42, normalized=True).values())
         avg_betweenness = float(np.mean(bc_vals))
         max_betweenness = float(np.max(bc_vals))
     except Exception:
@@ -272,6 +279,8 @@ def modularity_analysis(results: dict, G: nx.Graph, seed: int = 42, n_random: in
         return {"available": False}
     nodes, idx, u, v, w, deg = _arrays(G)
     m = float(w.sum())
+    if not np.isfinite(m) or m <= 0:
+        return {"available": False}          # modularity is undefined without positive edge weight
     rng = np.random.default_rng(seed)
 
     algos = []
@@ -347,13 +356,16 @@ def nmi_analysis(results: dict, G: nx.Graph, true_labels: dict | None, primary: 
     """
     - pairwise_agreement : NMI between every pair of algorithms. ALWAYS available (needs no label),
                            so the NMI view is never empty.
-    - nmi_by_algorithm   : NMI of each algorithm vs the label column (needs a label)
+    - nmi_by_algorithm   : NMI of each algorithm vs the label column (needs a label); None = undefined
+    - ami_by_algorithm   : chance-adjusted version of the same comparison
+    - nmi_null_by_algorithm : mean NMI after shuffling the labels (what pure chance looks like)
+    - coverage           : how many graph nodes were actually scored (graph nodes / labeled / evaluated)
     - nmi_vs_min_community_size : NMI as small communities are excluded (primary algorithm)
     - contingency        : community x label counts for the primary algorithm
-    - label_distribution : entities per label class
-    """
-    from sklearn.metrics import normalized_mutual_info_score as nmi
+    - label_distribution : entities per label class (evaluated population)
 
+    Population: nodes of G that have a usable label. Alignment is by node id only.
+    """
     out: dict = {"available": False}
     nodes = list(G.nodes())
 
@@ -361,33 +373,36 @@ def nmi_analysis(results: dict, G: nx.Graph, true_labels: dict | None, primary: 
     keys = list(results.keys())
     if len(keys) >= 1:
         parts = {k: _labels_of(results[k], nodes) for k in keys}
-        mat = [[1.0 if a == b else round(float(nmi(parts[a], parts[b])), 4) for b in keys] for a in keys]
+        mat = [[1.0 if a == b else round(nmi_score(parts[a], parts[b]), 4) for b in keys] for a in keys]
         out["pairwise_agreement"] = {"keys": keys, "matrix": mat}
 
     if true_labels is None:
         out["reason"] = ("No label column was used, so NMI against a ground truth cannot be computed. "
-                         "Tick \"Compare communities with a known label\" in step 1 of the wizard "
+                         "Tick 'Compare communities with a known label' in step 1 of the wizard "
                          "(e.g. final_result in studentInfo.csv).")
+        out["reason_code"] = "no_labels"
         return out
 
-    order = [n for n in nodes if true_labels.get(n) is not None and str(true_labels.get(n)) != "nan"]
-    if len(order) < 5 or len(set(true_labels[n] for n in order)) < 2:
-        out["reason"] = "Not enough labelled entities, or the label has only one class."
+    lab = {n: canonical_label(true_labels.get(n)) for n in nodes}
+    order = [n for n in nodes if lab[n] is not None]
+    out["coverage"] = {"graph_nodes": len(nodes), "labeled": len(order), "evaluated": len(order),
+                       "missing_label": len(nodes) - len(order),
+                       "coverage": round(len(order) / len(nodes), 4) if nodes else None}
+    n_classes = len({lab[n] for n in order})
+    if len(order) < MIN_EVALUATED or n_classes < 2:
+        code = "too_few_labeled" if len(order) < MIN_EVALUATED else "single_label_class"
+        out["reason"], out["reason_code"] = REASONS[code], code
         return out
 
-    label_dist = {}
+    label_dist: dict = {}
     for n in order:
-        label_dist[str(true_labels[n])] = label_dist.get(str(true_labels[n]), 0) + 1
+        label_dist[lab[n]] = label_dist.get(lab[n], 0) + 1
 
-    nmi_by_algo = {}
+    nmi_by_algo, ami_by_algo, null_by_algo, eval_by_algo = {}, {}, {}, {}
     for key, communities in results.items():
-        node_to_c = {n: i for i, c in enumerate(communities) for n in c}
-        y_true = [true_labels[n] for n in order if n in node_to_c]
-        y_pred = [node_to_c[n] for n in order if n in node_to_c]
-        try:
-            nmi_by_algo[key] = round(float(nmi(y_true, y_pred)), 6) if len(set(y_true)) >= 2 else None
-        except Exception:
-            nmi_by_algo[key] = None
+        ev = evaluate_partition(communities, lab, nodes, null_permutations=10, seed=0)
+        nmi_by_algo[key], ami_by_algo[key], null_by_algo[key] = ev["nmi"], ev["ami"], ev["nmi_null_mean"]
+        eval_by_algo[key] = {k: ev[k] for k in ("n_evaluated", "coverage", "n_communities_evaluated", "nmi_null_std")}
 
     base = primary if primary in results else (next(iter(results)) if results else None)
     sweep, cont = [], None
@@ -397,24 +412,23 @@ def nmi_analysis(results: dict, G: nx.Graph, true_labels: dict | None, primary: 
         all_sizes = sorted(set(len(c) for c in communities))
         for min_sz in sorted(set([1, 2, 3, 5, 10, 20] + all_sizes))[:20]:
             nodes_in = {n for c in communities if len(c) >= min_sz for n in c}
-            yt = [true_labels[n] for n in order if n in nodes_in]
-            yp = [node_to_c[n] for n in order if n in nodes_in]
-            if len(set(yt)) >= 2 and len(yp) >= 5:
-                try:
-                    sweep.append({"min_size": int(min_sz), "nodes_covered": int(len(yp)),
-                                  "nmi": round(float(nmi(yt, yp)), 6)})
-                except Exception:
-                    pass
-        table = {}
+            sub = [n for n in order if n in nodes_in]
+            yt = [lab[n] for n in sub]
+            yp = [node_to_c[n] for n in sub]
+            if len(set(yt)) >= 2 and len(yp) >= MIN_EVALUATED:
+                sweep.append({"min_size": int(min_sz), "nodes_covered": int(len(yp)),
+                              "nmi": round(nmi_score(yt, yp), 6)})
+        table: dict = {}
         for n in order:
             table.setdefault(node_to_c[n], {})
-            lab = str(true_labels[n])
-            table[node_to_c[n]][lab] = table[node_to_c[n]].get(lab, 0) + 1
+            table[node_to_c[n]][lab[n]] = table[node_to_c[n]].get(lab[n], 0) + 1
         cont = {"algorithm": base, "labels": sorted(label_dist, key=lambda x: -label_dist[x]),
                 "rows": [{"community_id": int(c), "counts": cnt, "total": int(sum(cnt.values()))}
                          for c, cnt in sorted(table.items(), key=lambda kv: -sum(kv[1].values()))]}
 
     out.update({"available": True, "primary": base, "nmi_by_algorithm": nmi_by_algo,
+                "ami_by_algorithm": ami_by_algo, "nmi_null_by_algorithm": null_by_algo,
+                "evaluation_by_algorithm": eval_by_algo,
                 "nmi_vs_min_community_size": sweep, "label_distribution": label_dist,
                 "contingency": cont})
     out.pop("reason", None)

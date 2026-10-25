@@ -13,7 +13,7 @@ class LookupSpec(BaseModel):
 
 
 class LabelSpec(BaseModel):
-    """Optional ground-truth label per entity (used only for NMI)."""
+    """Optional reference label per entity. Used ONLY to evaluate communities (NMI/AMI); never to build the graph."""
     path: str
     entity_col: str
     label_col: str
@@ -48,6 +48,8 @@ class Params(BaseModel):
     high_cut: Optional[float] = None
     min_community_size: int = Field(1, ge=1)   # smaller communities are flagged "Outlier group"
     max_edges_returned: int = 20000
+    # How many extra seeds to re-run the primary algorithm with to measure run-to-run stability (0/1 = off).
+    stability_runs: int = Field(8, ge=0, le=20)
 
 
 class RunRequest(BaseModel):

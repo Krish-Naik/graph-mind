@@ -14,9 +14,10 @@ Every algorithm's modularity is reported at gamma = 1 so the numbers are directl
 from __future__ import annotations
 import math
 import random
+import numpy as np
 import networkx as nx
 import networkx.algorithms.community as nx_comm
-from sklearn.metrics import normalized_mutual_info_score
+from .evaluation import evaluate_partition, nmi_score
 
 NAMES = {"louvain": "Louvain", "leiden": "Leiden", "lpa": "Label Propagation"}
 DEFAULT_LEIDEN_RESOLUTION = 1.5
@@ -204,30 +205,69 @@ def leiden_pure(G, seed: int = 42, resolution: float = 1.0, theta: float = 0.01,
 
 
 def _leiden(G, seed, resolution: float = DEFAULT_LEIDEN_RESOLUTION):
-    """Return (communities, backend_name). leidenalg first, built-in Python otherwise."""
+    """Return (communities, backend_name, fallback_reason). leidenalg first, built-in Python otherwise."""
     try:
-        return _leiden_leidenalg(G, seed, resolution), "leidenalg"
-    except Exception:
-        return leiden_pure(G, seed, resolution=resolution), "built-in Python"
+        return _leiden_leidenalg(G, seed, resolution), "leidenalg", None
+    except ImportError as exc:
+        return leiden_pure(G, seed, resolution=resolution), "built-in Python", f"leidenalg unavailable: {exc}"
+    except Exception as exc:          # a real leidenalg failure must be visible, not swallowed
+        return leiden_pure(G, seed, resolution=resolution), "built-in Python", f"leidenalg failed: {exc}"
+
+
+def validate_graph(G: nx.Graph) -> None:
+    """Community detection assumes a simple undirected graph with finite, strictly positive weights."""
+    if G.is_directed():
+        raise ValueError("Community detection expects an undirected graph.")
+    for u, v, d in G.edges(data=True):
+        w = d.get("weight", 1.0)
+        if not (isinstance(w, (int, float, np.floating, np.integer)) and math.isfinite(w) and w > 0):
+            raise ValueError(f"Edge ({u!r}, {v!r}) has invalid weight {w!r}; weights must be finite and > 0.")
+
+
+def _singletons(G):
+    return [{n} for n in G.nodes()]
+
+
+def _run(name: str, G, seed: int, leiden_resolution: float):
+    """Run one algorithm -> (communities, meta). An edgeless graph is all singletons by definition."""
+    if G.number_of_edges() == 0:
+        return _singletons(G), {"resolution": 1.0 if name != "leiden" else float(leiden_resolution)}
+    if name == "leiden":
+        comms, backend, why = _leiden(G, seed, leiden_resolution)
+        meta = {"backend": backend, "resolution": float(leiden_resolution)}
+        if why:
+            meta["backend_note"] = why
+        return comms, meta
+    if name == "louvain":
+        return _louvain(G, seed), {"resolution": 1.0}
+    if name == "lpa":
+        return _lpa(G, seed), {}
+    raise ValueError(f"Unknown community algorithm {name!r}.")
+
+
+def graph_modularity(G, comms) -> float | None:
+    """Weighted modularity (gamma = 1) of a partition; None when undefined (no edge weight at all)."""
+    if G.number_of_edges() == 0 or G.size(weight="weight") <= 0:
+        return None
+    return float(nx_comm.modularity(G, comms, weight="weight"))
 
 
 def detect(G: nx.Graph, algorithms: list[str], seed: int = 42, true_labels=None,
            leiden_resolution: float = DEFAULT_LEIDEN_RESOLUTION):
-    """Return (results, benchmark_rows). results[name] = list[set(node)]."""
+    """Return (results, benchmark_rows). results[name] = list[set(node)].
+
+    `true_labels` ({entity id: label}) is used ONLY to score the finished partitions; it is never
+    visible to the algorithms. Scores are computed on the entities of G that carry a label.
+    """
+    validate_graph(G)
     results, failed, meta = {}, [], {}
     for name in algorithms:
         try:
-            if name == "leiden":
-                results[name], backend = _leiden(G, seed, leiden_resolution)
-                meta[name] = {"backend": backend, "resolution": float(leiden_resolution)}
-            elif name == "louvain":
-                results[name] = _louvain(G, seed)
-                meta[name] = {"resolution": 1.0}
-            else:
-                results[name] = _lpa(G, seed)
+            results[name], meta[name] = _run(name, G, seed, leiden_resolution)
         except Exception as exc:  # one failing algorithm must not kill the run
             failed.append({"algorithm": NAMES[name], "key": name, "error": str(exc)})
     rows = []
+    population = list(G.nodes())
     for name in algorithms:
         hit = next((r for r in failed if r["key"] == name), None)
         if hit:
@@ -236,21 +276,50 @@ def detect(G: nx.Graph, algorithms: list[str], seed: int = 42, true_labels=None,
         if name not in results:
             continue
         comms = results[name]
+        mod = graph_modularity(G, comms)
         row = {
             "algorithm": NAMES[name], "key": name,
             "num_communities": len(comms),
-            # always evaluated at gamma = 1 so Louvain / Leiden / LPA can be compared fairly
-            "modularity": round(float(nx_comm.modularity(G, comms, weight="weight")), 6),
+            # always evaluated at gamma = 1 so Louvain / Leiden / LPA can be compared fairly;
+            # None (not 0.0) when the graph has no edge weight, where modularity is undefined
+            "modularity": None if mod is None else round(mod, 6),
             "nmi": None,
         }
         row.update(meta.get(name, {}))
-        if true_labels is not None:
-            node_to_c = {n: i for i, c in enumerate(comms) for n in c}
-            order_n = list(G.nodes())
-            mask = [true_labels.get(n) is not None and str(true_labels.get(n)) != "nan" for n in order_n]
-            y_true = [true_labels[n] for n, ok in zip(order_n, mask) if ok]
-            y_pred = [node_to_c[n] for n, ok in zip(order_n, mask) if ok]
-            if len(set(y_true)) > 1:
-                row["nmi"] = round(float(normalized_mutual_info_score(y_true, y_pred)), 6)
+        ev = evaluate_partition(comms, true_labels, population, null_permutations=10, seed=seed)
+        row.update({
+            "nmi": ev["nmi"], "ami": ev["ami"], "nmi_null_mean": ev["nmi_null_mean"],
+            "nmi_evaluated": ev["n_evaluated"], "nmi_coverage": ev["coverage"],
+            "nmi_reason": ev["reason"],
+        })
         rows.append(row)
     return results, rows
+
+
+def partition_stability(G: nx.Graph, algorithm: str = "louvain", n_runs: int = 8, seed: int = 42,
+                        leiden_resolution: float = DEFAULT_LEIDEN_RESOLUTION) -> dict:
+    """Re-run one algorithm with `n_runs` different seeds and measure how much the answer moves.
+
+    pairwise_nmi_mean close to 1 and a small modularity spread = the partition is a property of the
+    graph; low values = the result depends on the random seed and should not be over-interpreted.
+    """
+    n_runs = int(n_runs)
+    if n_runs < 2 or G.number_of_edges() == 0:
+        return {"available": False, "algorithm": algorithm, "runs": max(n_runs, 0)}
+    nodes = list(G.nodes())
+    mods, ks, labelings = [], [], []
+    for i in range(n_runs):
+        comms, _ = _run(algorithm, G, seed + i, leiden_resolution)
+        n2c = {n: c for c, members in enumerate(comms) for n in members}
+        labelings.append([n2c[n] for n in nodes])
+        mods.append(graph_modularity(G, comms))
+        ks.append(len(comms))
+    pair = [nmi_score(labelings[i], labelings[j]) for i in range(n_runs) for j in range(i + 1, n_runs)]
+    return {
+        "available": True, "algorithm": algorithm, "runs": n_runs, "seeds": [seed + i for i in range(n_runs)],
+        "modularity_mean": round(float(np.mean(mods)), 6), "modularity_std": round(float(np.std(mods)), 6),
+        "modularity_min": round(float(np.min(mods)), 6), "modularity_max": round(float(np.max(mods)), 6),
+        "num_communities_min": int(min(ks)), "num_communities_max": int(max(ks)),
+        "num_communities_mean": round(float(np.mean(ks)), 2),
+        "pairwise_nmi_mean": round(float(np.mean(pair)), 6), "pairwise_nmi_min": round(float(np.min(pair)), 6),
+    }

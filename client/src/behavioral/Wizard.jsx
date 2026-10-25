@@ -5,6 +5,7 @@ import { DEFAULT_TIERS } from '../util.js';
 import DataTable from '../components/DataTable.jsx';
 import SimilarityChart from './SimilarityChart.jsx';
 import Results from './Results.jsx';
+import { ConfigPreview, ProfilePanel, colHint, validateParams } from './ConfigPanels.jsx';
 
 const STEPS = ['1. Map your data', '2. Check suitability', '3. Parameters', '4. Run & results'];
 
@@ -128,10 +129,14 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
   const [labelTouched, setLabelTouched] = useState(false);   // user decided about the label: stop auto-detecting
   const [lookupTouched, setLookupTouched] = useState(false);  // same for the lookup join
   const [lookupAuto, setLookupAuto] = useState(null);         // what was auto-detected (for the info banner)
+  const [checkedSample, setCheckedSample] = useState(null);   // sample size the similarity histogram was computed with
 
   const setMap = (patch) => setM((x) => ({ ...x, ...patch }));
   const cols = (fid) => profiles[fid]?.columns || [];
   const names = (fid) => cols(fid).map((c) => c.name);
+  const colOpts = (fid) => cols(fid).map((c) => ({ value: c.name, label: colHint(c) }));   // name + type + distinct count
+  const mainProfile = profiles[m.mainFileId];
+  const entityInfo = mainProfile?.columns.find((c) => c.name === m.entity_col);
   const fileOpts = files.map((f) => ({ value: f.id, label: f.originalName }));
   const presets = PRESETS.filter((p) => p.match(files));
 
@@ -163,7 +168,6 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
     }));
   }, [files, profiles, m.mainFileId, m.entity_col, m.format, m.useLookup, m.behavior_col, lookupTouched]);
 
-  const behaviorCols = m.useLookup ? names(m.lookup.fileId) : names(m.mainFileId);
   const numericCols = cols(m.mainFileId).filter((c) => c.numeric).map((c) => c.name);
 
   function applyPreset(p) {
@@ -171,8 +175,18 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
     setLabelTouched(true); setLookupTouched(true); setLookupAuto(null); setM(built.mapping); setParams((x) => ({ ...x, ...built.params })); setCheck(null);
   }
 
+  /** start from an empty mapping (presets and auto-detection stay available but are not applied) */
+  function clearMapping() {
+    setLabelTouched(true); setLookupTouched(true); setLookupAuto(null); setCheck(null);
+    setM({ ...initialMapping(m.mainFileId), format: m.format });
+  }
+  function changeMainFile(v) {
+    setLabelTouched(false); setLookupTouched(false); setLookupAuto(null); setCheck(null);
+    setM({ ...initialMapping(v), format: m.format });
+  }
+
   async function goCheck() {
-    setStep(2); setChecking(true); setCheckErr(null); setCheck(null);
+    setStep(2); setChecking(true); setCheckErr(null); setCheck(null); setCheckedSample(Number(params.sample_size) || null);
     try { setCheck(await api.check(datasetId, toMapping(m), Number(params.sample_size) || null)); }
     catch (e) { setCheckErr(e.message); } finally { setChecking(false); }
   }
@@ -185,7 +199,9 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
 
   const setP = (patch) => setParams((x) => ({ ...x, ...patch }));
   const toggleAlgo = (a) => setP({ algorithms: params.algorithms.includes(a) ? params.algorithms.filter((x) => x !== a) : [...params.algorithms, a] });
-  const paramsOk = params.algorithms.length > 0 && (params.tier_method !== 'thresholds' || (params.low_cut !== '' && params.high_cut !== ''));
+  const pv = validateParams(params);
+  const paramsOk = pv.errors.length === 0;
+  const numericFeatures = numericCols.filter((c) => c !== m.entity_col);
 
   return (
     <>
@@ -199,22 +215,27 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
         <div className="card">
           {presets.map((p) => (
             <div className="alert ok row between" key={p.id}>
-              <span>Recognised <b>{p.name}</b>: {p.description}.</span>
+              <span>Recognised <b>{p.name}</b>: {p.description}. A preset is only a starting point; every field below stays editable.</span>
               <button onClick={() => applyPreset(p)}>Apply preset</button>
             </div>
           ))}
+          <ProfilePanel file={files.find((f) => f.id === m.mainFileId)} profile={mainProfile} />
           <div className="grid g2">
             <div>
               <h3>Main data file</h3>
-              <Field label="File"><Select value={m.mainFileId} onChange={(v) => setMap({ mainFileId: v, entity_col: '', behavior_col: '', value_col: '', feature_cols: [] })} options={fileOpts} /></Field>
+              <Field label="File"><Select value={m.mainFileId} onChange={changeMainFile} options={fileOpts} /></Field>
               <Field label="Layout" hint={m.format === 'long' ? 'One row per event/record (e.g. a click log).' : 'One row per entity, one numeric column per behavior.'}>
                 <Select value={m.format} onChange={(v) => setMap({ format: v })} blank="" options={[{ value: 'long', label: 'Long: event log (entity, behavior, value)' }, { value: 'wide', label: 'Wide: ready-made matrix' }]} />
               </Field>
-              <Field label="Entity ID column" hint="Who is being grouped, e.g. student, customer, user id."><Select value={m.entity_col} onChange={(v) => setMap({ entity_col: v })} options={names(m.mainFileId)} /></Field>
+              <Field label="Entity ID column" hint={`Who is being grouped, e.g. student, customer, user id.${entityInfo ? ` This column has ~${entityInfo.approx_distinct.toLocaleString()} distinct values in ${mainProfile.rows.toLocaleString()} rows.` : ''}`}><Select value={m.entity_col} onChange={(v) => setMap({ entity_col: v })} options={colOpts(m.mainFileId)} /></Field>
               {m.format === 'wide' ? (
-                <Field label="Behavior columns (pick at least 2)">
+                <Field label={`Behavior columns (pick at least 2; ${m.feature_cols.length} selected)`}>
+                  <div className="row" style={{ marginBottom: 6 }}>
+                    <button type="button" className="ghost" style={{ padding: '3px 10px', fontSize: 12 }} onClick={() => setMap({ feature_cols: numericFeatures })}>Select all numeric</button>
+                    <button type="button" className="ghost" style={{ padding: '3px 10px', fontSize: 12 }} onClick={() => setMap({ feature_cols: [] })}>Clear</button>
+                  </div>
                   <div className="tablewrap" style={{ maxHeight: 180, padding: 8 }}>
-                    {numericCols.filter((c) => c !== m.entity_col).map((c) => (
+                    {numericFeatures.map((c) => (
                       <div className="inline" key={c}><input type="checkbox" id={`f-${c}`} checked={m.feature_cols.includes(c)}
                         onChange={() => setMap({ feature_cols: m.feature_cols.includes(c) ? m.feature_cols.filter((x) => x !== c) : [...m.feature_cols, c] })} /><label htmlFor={`f-${c}`}>{c}</label></div>
                     ))}
@@ -223,10 +244,10 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
               ) : (
                 <>
                   <Field label="Behavior category column" hint={m.useLookup ? 'Taken from the lookup file.' : 'The type of action, e.g. activity type, product category, genre.'}>
-                    <Select value={m.behavior_col} onChange={(v) => setMap({ behavior_col: v })} options={behaviorCols} /></Field>
+                    <Select value={m.behavior_col} onChange={(v) => setMap({ behavior_col: v })} options={m.useLookup ? colOpts(m.lookup.fileId) : colOpts(m.mainFileId)} /></Field>
                   <div className="grid g2">
                     <Field label="Aggregation"><Select value={m.agg} onChange={(v) => setMap({ agg: v })} blank="" options={['sum', 'count', 'mean', 'max']} /></Field>
-                    {m.agg !== 'count' && <Field label="Value column (numeric)"><Select value={m.value_col} onChange={(v) => setMap({ value_col: v })} options={numericCols} /></Field>}
+                    {m.agg !== 'count' && <Field label="Value column (numeric)"><Select value={m.value_col} onChange={(v) => setMap({ value_col: v })} options={cols(m.mainFileId).filter((c) => c.numeric).map((c) => ({ value: c.name, label: colHint(c) }))} /></Field>}
                   </div>
                 </>
               )}
@@ -260,27 +281,32 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
                   {!labelTouched && <div className="alert ok" style={{ padding: '6px 10px' }}>Label detected automatically: <b>{m.label.label_col}</b>. Change or untick it below if it is not what you want.</div>}
                   <Field label="Label file"><Select value={m.label.fileId} onChange={(v) => { setLabelTouched(true); setMap({ label: { ...m.label, fileId: v } }); }} options={fileOpts} /></Field>
                   <div className="grid g2">
-                    <Field label="Entity column"><Select value={m.label.entity_col} onChange={(v) => setMap({ label: { ...m.label, entity_col: v } })} options={names(m.label.fileId)} /></Field>
-                    <Field label="Label column"><Select value={m.label.label_col} onChange={(v) => setMap({ label: { ...m.label, label_col: v } })} options={names(m.label.fileId)} /></Field>
+                    <Field label="Entity column" hint="Must hold the same ids as the entity column of the main file."><Select value={m.label.entity_col} onChange={(v) => setMap({ label: { ...m.label, entity_col: v } })} options={colOpts(m.label.fileId)} /></Field>
+                    <Field label="Label column" hint="Never used to build the graph, only to score the communities."><Select value={m.label.label_col} onChange={(v) => setMap({ label: { ...m.label, label_col: v } })} options={colOpts(m.label.fileId)} /></Field>
                   </div>
                 </>
               )}
             </div>
           </div>
-          <button onClick={goCheck} disabled={!mappingReady(m)}>Check if this data is suitable &rarr;</button>
+          <div className="row">
+            <button onClick={goCheck} disabled={!mappingReady(m)}>Check if this data is suitable &rarr;</button>
+            <button className="ghost" onClick={clearMapping}>Clear mapping</button>
+            {!mappingReady(m) && <span className="muted small">Choose the entity ID{m.format === 'wide' ? ' and at least 2 behavior columns' : ', the behavior category and (unless counting rows) a numeric value column'} to continue.</span>}
+          </div>
         </div>
       )}
 
       {step === 2 && (
         <div className="card">
           {checking && <div className="row"><span className="spinner" /> Building the matrix and checking suitability... (large files can take a few seconds)</div>}
-          {checkErr && <div className="alert err">{checkErr}</div>}
+          {checkErr && <div className="alert err"><b>The check failed, so the analysis cannot start with this configuration.</b><br />{checkErr}</div>}
           {check && (
             <>
-              {check.ok ? <div className="alert ok"><b>Suitable.</b> This data can be analysed.</div>
-                : <div className="alert err"><b>Not suitable for behavioral analysis.</b></div>}
-              {check.errors.map((e, i) => <div key={i} className="alert err">{e}</div>)}
-              {check.warnings.map((e, i) => <div key={i} className="alert warn">{e}</div>)}
+              {check.ok ? <div className="alert ok"><b>Suitable.</b> This data can be analysed{check.warnings.length ? `; please read the ${check.warnings.length} warning(s) below first.` : '.'}</div>
+                : <div className="alert err"><b>Not suitable for behavioral analysis.</b> Fix the blocking problem(s) below in step 1.</div>}
+              {check.errors.map((e, i) => <div key={i} className="alert err"><b>Blocking:</b> {e}</div>)}
+              {check.warnings.map((e, i) => <div key={i} className="alert warn"><b>Warning:</b> {e}</div>)}
+              {(check.config?.issues || []).filter((x) => x.level === 'info').map((x, i) => <div key={i} className="alert info">{x.message}</div>)}
               <div className="grid g4" style={{ margin: '12px 0' }}>
                 <div className="card stat"><div className="v">{check.stats.entities.toLocaleString()}</div><div className="l">entities</div></div>
                 <div className="card stat"><div className="v">{check.stats.behaviors}</div><div className="l">behavior categories</div></div>
@@ -312,6 +338,10 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
                   <input type="range" min="0.5" max="0.99" step="0.01" value={params.threshold} onChange={(e) => setP({ threshold: Number(e.target.value) })} style={{ width: '100%' }} /></Field>
               ) : (
                 <Field label="k (neighbours per entity)"><input type="number" min="1" max="100" value={params.knn_k} onChange={(e) => setP({ knn_k: e.target.value })} /></Field>
+              )}
+              {check?.similarity && checkedSample !== (Number(params.sample_size) || null) && (
+                <div className="alert info row between" style={{ padding: '6px 10px' }}>
+                  <span>The histogram below was computed with a different sample size.</span><button className="ghost" onClick={goCheck}>Re-run check</button></div>
               )}
               {check?.similarity && <SimilarityChart hist={check.similarity} threshold={params.graph_method === 'threshold' ? params.threshold : null} />}
             </div>
@@ -346,7 +376,10 @@ export default function Wizard({ datasetId, files, profiles, activeFileId, onFin
                 <input type="number" min="1" value={params.min_community_size} onChange={(e) => setP({ min_community_size: e.target.value })} /></Field>
             </div>
           </div>
-          <div className="row">
+          {pv.errors.map((e, i) => <div key={i} className="alert err"><b>Blocking:</b> {e}</div>)}
+          {pv.warnings.map((e, i) => <div key={i} className="alert warn"><b>Warning:</b> {e}</div>)}
+          <ConfigPreview mapping={toMapping(m)} params={toParams(params)} files={files} />
+          <div className="row" style={{ marginTop: 14 }}>
             <button className="ghost" onClick={() => setStep(2)}>&larr; Back</button>
             <button onClick={run} disabled={!paramsOk}>Run analysis</button>
           </div>
