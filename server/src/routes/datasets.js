@@ -8,7 +8,8 @@ import { config } from '../config.js';
 import { HttpError } from '../errors.js';
 import { engine } from '../engine.js';
 
-const ALLOWED = new Set(['.csv', '.tsv', '.txt', '.xlsx', '.xls', '.zip']);
+const ALLOWED = new Set(['.csv', '.tsv', '.txt', '.xlsx', '.xls', '.zip', '.gz', '.tgz']);
+const isArchive = (n) => /\.(zip|tar\.gz|tgz)$/i.test(n);
 const safeName = (n) => path.basename(n).replace(/[^\w.\-]+/g, '_') || 'file';
 
 export function datasetRoutes(store) {
@@ -34,7 +35,7 @@ export function datasetRoutes(store) {
     limits: { fileSize: config.maxUploadBytes, files: 20 },
     fileFilter(_req, file, cb) {
       const ext = path.extname(file.originalname).toLowerCase();
-      ALLOWED.has(ext) ? cb(null, true) : cb(new HttpError(400, `Unsupported file type '${ext}'. Use CSV, TSV, TXT, XLSX, XLS or ZIP.`));
+      (ALLOWED.has(ext) && (ext !== '.gz' || isArchive(file.originalname))) ? cb(null, true) : cb(new HttpError(400, `Unsupported file type '${ext}'. Use CSV, TSV, TXT, XLSX, XLS, ZIP or TAR.GZ.`));
     },
   });
 
@@ -45,7 +46,7 @@ export function datasetRoutes(store) {
       files.push({ id: randomUUID().slice(0, 8), originalName: displayName || path.basename(p), path: p, size: fs.statSync(p).size, profile: null });
     };
     for (const f of uploaded) {
-      if (path.extname(f.originalname).toLowerCase() === ".zip") {
+      if (isArchive(f.originalname)) {
         for (const p of (await engine.unzip(f.path)).paths) await addOne(p);   // every data file inside becomes a dataset file
       } else {
         await addOne(f.path, f.originalname);
@@ -54,8 +55,10 @@ export function datasetRoutes(store) {
     return files;
   }
 
-  const pub = (d) => ({ id: d.id, name: d.name, createdAt: d.createdAt,
-    files: d.files.map((f) => ({ id: f.id, originalName: f.originalName, size: f.size, profiled: !!f.profile })) });
+  const pub = (d) => ({
+    id: d.id, name: d.name, createdAt: d.createdAt,
+    files: d.files.map((f) => ({ id: f.id, originalName: f.originalName, size: f.size, profiled: !!f.profile }))
+  });
 
   // ---------- routes ----------
   r.get('/', async (_req, res) => res.json((await store.datasets.list()).map(pub)));

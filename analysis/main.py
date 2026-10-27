@@ -2,6 +2,8 @@
 import os
 import re
 import shutil
+import gzip
+import tarfile
 import zipfile
 from pathlib import Path
 from typing import Optional
@@ -159,33 +161,53 @@ MAX_UNZIPPED = 8 * 1024 ** 3     # zip-bomb guard
 
 @app.post("/unzip")
 def unzip(body: dict):
-    """Extract the data files of a .zip next to it. Only base names are used (no zip-slip),
+    """Extract the data files of a .zip / .tar.gz / .tgz next to it. Only base names are used (no zip-slip),
     folders/hidden/macOS junk/unsupported files are skipped, total size is capped."""
     src = Path(safe(body["path"]))
-    if src.suffix.lower() != ".zip":
-        raise HTTPException(400, "Not a .zip file.")
+    lower = src.name.lower()
+    is_tar = lower.endswith(".tar.gz") or lower.endswith(".tgz")
+    if src.suffix.lower() != ".zip" and not is_tar:
+        raise HTTPException(400, "Not a .zip or .tar.gz file.")
     out, total, done = src.parent, 0, []
+
+    def save(name: Path, opener):
+        base = re.sub(r"[^\w.\-]+", "_", name.name) or "file"
+        target, n = out / base, 1
+        while target.exists():
+            target = out / f"{Path(base).stem}_{n}{Path(base).suffix}"; n += 1
+        with opener() as s_, open(target, "wb") as d_:
+            shutil.copyfileobj(s_, d_)
+        done.append(str(target))
+
+    def wanted(name: Path, is_dir: bool) -> bool:
+        return not (is_dir or "__MACOSX" in name.parts or name.name.startswith(".") or name.suffix.lower() not in SUPPORTED)
+
     try:
-        with zipfile.ZipFile(src) as z:
-            for info in z.infolist():
-                name = Path(info.filename)
-                if info.is_dir() or "__MACOSX" in name.parts or name.name.startswith("."):
-                    continue
-                if name.suffix.lower() not in SUPPORTED:
-                    continue
-                total += info.file_size
-                if total > MAX_UNZIPPED:
-                    raise HTTPException(400, "Zip is too large when extracted.")
-                base = re.sub(r"[^\w.\-]+", "_", name.name) or "file"
-                target, n = out / base, 1
-                while target.exists():
-                    target = out / f"{Path(base).stem}_{n}{Path(base).suffix}"; n += 1
-                with z.open(info) as s_, open(target, "wb") as d_:
-                    shutil.copyfileobj(s_, d_)
-                done.append(str(target))
+        if is_tar:
+            with tarfile.open(src, "r:gz") as t:
+                for m in t:
+                    name = Path(m.name)
+                    if not m.isfile() or not wanted(name, False):
+                        continue
+                    total += m.size
+                    if total > MAX_UNZIPPED:
+                        raise HTTPException(400, "Archive is too large when extracted.")
+                    save(name, lambda m=m: t.extractfile(m))
+        else:
+            with zipfile.ZipFile(src) as z:
+                for info in z.infolist():
+                    name = Path(info.filename)
+                    if not wanted(name, info.is_dir()):
+                        continue
+                    total += info.file_size
+                    if total > MAX_UNZIPPED:
+                        raise HTTPException(400, "Zip is too large when extracted.")
+                    save(name, lambda info=info: z.open(info))
     except zipfile.BadZipFile:
         raise HTTPException(400, "This .zip file is damaged or not a real zip.")
+    except (tarfile.TarError, EOFError, gzip.BadGzipFile):
+        raise HTTPException(400, "This .tar.gz file is damaged or not a real tar.gz.")
     src.unlink(missing_ok=True)
     if not done:
-        raise HTTPException(422, "The zip contains no CSV/TSV/TXT/XLSX/XLS files.")
+        raise HTTPException(422, "The archive contains no CSV/TSV/TXT/XLSX/XLS files.")
     return {"paths": sorted(done)}

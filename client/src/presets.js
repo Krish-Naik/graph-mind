@@ -1,6 +1,10 @@
 // One-click mappings for known datasets. Matched by file names; generic mapping still works for everything else.
 const find = (files, name) => files.find((f) => f.originalName.toLowerCase() === name.toLowerCase());
 
+// MOOC action log: file names may be .tsv or .csv, with or without a prefix (e.g. "mooc_actions.tsv")
+const findLike = (files, re) => files.find((f) => re.test(f.originalName));
+const MOOC_ACTIONS = /^(?!\.)(.*[^a-z])?mooc_actions\.(tsv|csv|txt)$/i;   // not the hidden "._mooc_actions.tsv" copies macOS makes
+
 export const PRESETS = [
   {
     id: 'oulad',
@@ -16,6 +20,23 @@ export const PRESETS = [
         label: { fileId: find(files, 'studentInfo.csv')?.id || '', entity_col: 'id_student', label_col: 'final_result' },
       },
       params: { sample_size: 300, threshold: 0.85 },
+    }),
+  },
+  {
+    id: 'mooc',
+    name: 'MOOC actions (act-mooc)',
+    description: 'users x course activity (TARGETID), number of actions; the other mooc_* files are not needed',
+    match: (files) => !!findLike(files, MOOC_ACTIONS),
+    build: (files) => ({
+      mapping: {
+        mainFileId: findLike(files, MOOC_ACTIONS).id, format: 'long', entity_col: 'USERID', behavior_col: 'TARGETID',
+        value_col: '', agg: 'count', feature_cols: [],
+        useLookup: false, lookup: { fileId: '', source_key: '', lookup_key: '', split_delimiter: '' },
+        // the label file of this dataset marks single ACTIONS (dropout yes/no), not users, so it cannot be used for NMI
+        useLabel: false, label: { fileId: '', entity_col: '', label_col: '' },
+      },
+      // 97 activity types give sparse behavior vectors: tau 0.85 would leave most users unconnected, 0.7 connects ~90%
+      params: { sample_size: 300, threshold: 0.7 },
     }),
   },
   {

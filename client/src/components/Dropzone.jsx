@@ -5,6 +5,7 @@ const ACCEPT = {
   'application/vnd.ms-excel': ['.csv', '.xls'],
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
   'application/zip': ['.zip'], 'application/x-zip-compressed': ['.zip'],
+  'application/gzip': ['.gz', '.tgz'], 'application/x-gzip': ['.gz', '.tgz'], 'application/x-tar': ['.tar'], 'application/x-compressed-tar': ['.tgz'],
 };
 
 /** Drag-and-drop OR click-to-browse. */
@@ -17,7 +18,7 @@ export default function Dropzone({ onFiles, compact = false, hint }) {
         {isDragActive ? <p><strong>Drop the files here...</strong></p> : (
           <>
             <p style={{ margin: 0, fontSize: compact ? 14 : 16 }}>
-              <strong>Drag &amp; drop</strong> CSV / TSV / Excel / <strong>ZIP</strong> files here, or <strong>click to browse</strong>
+              <strong>Drag &amp; drop</strong> CSV / TSV / Excel / <strong>ZIP / TAR.GZ</strong> files here, or <strong>click to browse</strong>
             </p>
             <p className="muted" style={{ margin: '6px 0 0' }}>{hint || 'A single CSV is enough for most data. Have several related tables? Upload them together, or just drop one ZIP.'}</p>
           </>
@@ -25,7 +26,7 @@ export default function Dropzone({ onFiles, compact = false, hint }) {
       </div>
       {fileRejections.length > 0 && (
         <div className="alert err" style={{ marginTop: 8 }}>
-          Unsupported: {fileRejections.map((r) => r.file.name).join(', ')}. Use CSV, TSV, TXT, XLSX, XLS or ZIP.
+          Unsupported: {fileRejections.map((r) => r.file.name).join(', ')}. Use CSV, TSV, TXT, XLSX, XLS, ZIP or TAR.GZ.
         </div>
       )}
     </div>
